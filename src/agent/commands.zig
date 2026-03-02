@@ -12,6 +12,7 @@ const capabilities_mod = @import("../capabilities.zig");
 const config_mutator = @import("../config_mutator.zig");
 const context_tokens = @import("context_tokens.zig");
 const max_tokens_resolver = @import("max_tokens.zig");
+const version = @import("../version.zig");
 
 const SlashCommand = struct {
     name: []const u8,
@@ -680,31 +681,32 @@ fn formatStatus(self: anytype) ![]const u8 {
     errdefer out.deinit(self.allocator);
     const w = out.writer(self.allocator);
 
-    try w.print("Model: {s}\n", .{self.model_name});
-    try w.print("History: {d} messages\n", .{self.history.items.len});
-    try w.print("Tokens used: {d}\n", .{self.total_tokens});
-    try w.print("Tools: {d} available\n", .{self.tools.len});
-    try w.print("Thinking: {s}\n", .{self.reasoning_effort orelse "off"});
-    try w.print("Verbose: {s}\n", .{self.verbose_level.toSlice()});
-    try w.print("Reasoning: {s}\n", .{self.reasoning_mode.toSlice()});
-    try w.print("Usage: {s}\n", .{self.usage_mode.toSlice()});
+    try w.print("🌊 NullClaw {s}\n", .{version.string});
+    try w.print("🧠 Model: {s}\n", .{self.model_name});
+    try w.print("💬 History: {d} messages\n", .{self.history.items.len});
+    try w.print("🧮 Tokens used: {d}\n", .{self.total_tokens});
+    try w.print("🔧 Tools: {d} available\n", .{self.tools.len});
+    try w.print("💭 Thinking: {s}\n", .{self.reasoning_effort orelse "off"});
+    try w.print("📢 Verbose: {s}\n", .{self.verbose_level.toSlice()});
+    try w.print("🧩 Reasoning: {s}\n", .{self.reasoning_mode.toSlice()});
+    try w.print("📈 Usage: {s}\n", .{self.usage_mode.toSlice()});
     try w.print(
-        "Exec: host={s} security={s} ask={s}",
+        "⚙️ Exec: host={s} security={s} ask={s}",
         .{ self.exec_host.toSlice(), self.exec_security.toSlice(), self.exec_ask.toSlice() },
     );
     if (self.exec_node_id) |id| try w.print(" node={s}", .{id});
     try w.writeAll("\n");
     try w.print(
-        "Queue: mode={s} debounce={d}ms cap={d} drop={s}\n",
+        "🪢 Queue: mode={s} debounce={d}ms cap={d} drop={s}\n",
         .{ self.queue_mode.toSlice(), self.queue_debounce_ms, self.queue_cap, self.queue_drop.toSlice() },
     );
-    try w.print("TTS: mode={s} provider={s}\n", .{ self.tts_mode.toSlice(), self.tts_provider orelse "default" });
-    try w.print("Activation: {s}\n", .{self.activation_mode.toSlice()});
-    try w.print("Send: {s}\n", .{self.send_mode.toSlice()});
+    try w.print("🔊 TTS: mode={s} provider={s}\n", .{ self.tts_mode.toSlice(), self.tts_provider orelse "default" });
+    try w.print("📡 Activation: {s}\n", .{self.activation_mode.toSlice()});
+    try w.print("📤 Send: {s}\n", .{self.send_mode.toSlice()});
     if (self.session_ttl_secs) |ttl| {
-        try w.print("Session TTL: {d}s\n", .{ttl});
+        try w.print("⏰ Session TTL: {d}s\n", .{ttl});
     } else {
-        try w.writeAll("Session TTL: off\n");
+        try w.writeAll("⏰ Session TTL: off\n");
     }
     return try out.toOwnedSlice(self.allocator);
 }
