@@ -72,7 +72,11 @@ ls -lh zig-out/bin/nullclaw
 git clone https://github.com/nullclaw/nullclaw.git
 cd nullclaw
 zig build -Doptimize=ReleaseSmall
+cd zig-out/bin
+echo "export PATH=\$PATH:$(pwd)" >> ~/.bashrc
+source ~/.bashrc
 
+zig build test --summary all  
 # Quick setup
 nullclaw onboard --api-key sk-... --provider openrouter
 
