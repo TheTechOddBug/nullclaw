@@ -203,7 +203,7 @@ pub const OpenAiCompatibleProvider = struct {
             if (ot == .string) {
                 const trimmed = std.mem.trim(u8, ot.string, " \t\n\r");
                 if (trimmed.len > 0) {
-                    return try allocator.dupe(u8, trimmed);
+                    return stripThinkBlocks(allocator, trimmed);
                 }
             }
         }
@@ -220,7 +220,7 @@ pub const OpenAiCompatibleProvider = struct {
                                     if (text == .string) {
                                         const trimmed = std.mem.trim(u8, text.string, " \t\n\r");
                                         if (trimmed.len > 0) {
-                                            return try allocator.dupe(u8, trimmed);
+                                            return stripThinkBlocks(allocator, trimmed);
                                         }
                                     }
                                 }
@@ -240,7 +240,7 @@ pub const OpenAiCompatibleProvider = struct {
                             if (text == .string) {
                                 const trimmed = std.mem.trim(u8, text.string, " \t\n\r");
                                 if (trimmed.len > 0) {
-                                    return try allocator.dupe(u8, trimmed);
+                                    return stripThinkBlocks(allocator, trimmed);
                                 }
                             }
                         }
@@ -343,6 +343,41 @@ pub const OpenAiCompatibleProvider = struct {
         needs_free: bool,
     };
 
+    fn stripThinkBlocks(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+        const open_tag = "<think>";
+        const close_tag = "</think>";
+
+        if (std.mem.indexOf(u8, text, open_tag) == null and std.mem.indexOf(u8, text, close_tag) == null) {
+            return allocator.dupe(u8, text);
+        }
+
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(allocator);
+
+        var i: usize = 0;
+        var depth: usize = 0;
+        while (i < text.len) {
+            if (std.mem.startsWith(u8, text[i..], open_tag)) {
+                depth += 1;
+                i += open_tag.len;
+                continue;
+            }
+            if (std.mem.startsWith(u8, text[i..], close_tag)) {
+                if (depth > 0) depth -= 1;
+                i += close_tag.len;
+                continue;
+            }
+            if (depth == 0) try out.append(allocator, text[i]);
+            i += 1;
+        }
+
+        const cleaned = try out.toOwnedSlice(allocator);
+        const trimmed = std.mem.trim(u8, cleaned, " \t\r\n");
+        if (trimmed.ptr == cleaned.ptr and trimmed.len == cleaned.len) return cleaned;
+        defer allocator.free(cleaned);
+        return allocator.dupe(u8, trimmed);
+    }
+
     /// Parse text content from an OpenAI-compatible response.
     pub fn parseTextResponse(allocator: std.mem.Allocator, body: []const u8) ![]const u8 {
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
@@ -358,7 +393,7 @@ pub const OpenAiCompatibleProvider = struct {
                 if (choices.array.items[0].object.get("message")) |msg| {
                     if (msg.object.get("content")) |content| {
                         if (content == .string) {
-                            return try allocator.dupe(u8, content.string);
+                            return stripThinkBlocks(allocator, content.string);
                         }
                     }
                 }
@@ -386,7 +421,7 @@ pub const OpenAiCompatibleProvider = struct {
                 var content: ?[]const u8 = null;
                 if (msg_obj.get("content")) |c| {
                     if (c == .string) {
-                        content = try allocator.dupe(u8, c.string);
+                        content = try stripThinkBlocks(allocator, c.string);
                     }
                 }
 
@@ -840,6 +875,36 @@ test "parseTextResponse extracts content" {
     try std.testing.expectEqualStrings("Hello from Venice!", result);
 }
 
+test "parseTextResponse strips think blocks" {
+    const body =
+        \\{"choices":[{"message":{"content":"<think>private reasoning</think>\nVisible answer"}}]}
+    ;
+    const result = try OpenAiCompatibleProvider.parseTextResponse(std.testing.allocator, body);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("Visible answer", result);
+}
+
+test "parseNativeResponse strips think blocks from content" {
+    const body =
+        \\{"choices":[{"message":{"content":"<think>private reasoning</think>\nVisible answer"}}],"model":"minimax-m2.5"}
+    ;
+    const result = try OpenAiCompatibleProvider.parseNativeResponse(std.testing.allocator, body);
+    defer {
+        if (result.content) |content| {
+            if (content.len > 0) std.testing.allocator.free(content);
+        }
+        for (result.tool_calls) |tc| {
+            if (tc.id.len > 0) std.testing.allocator.free(tc.id);
+            if (tc.name.len > 0) std.testing.allocator.free(tc.name);
+            if (tc.arguments.len > 0) std.testing.allocator.free(tc.arguments);
+        }
+        if (result.tool_calls.len > 0) std.testing.allocator.free(result.tool_calls);
+        if (result.model.len > 0) std.testing.allocator.free(result.model);
+    }
+    try std.testing.expect(result.content != null);
+    try std.testing.expectEqualStrings("Visible answer", result.content.?);
+}
+
 test "parseTextResponse empty choices" {
     const body =
         \\{"choices":[]}
@@ -1063,6 +1128,15 @@ test "extractResponsesText top-level output_text" {
     const result = try OpenAiCompatibleProvider.extractResponsesText(std.testing.allocator, body);
     defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("Hello from top-level", result);
+}
+
+test "extractResponsesText strips think blocks" {
+    const body =
+        \\{"output_text":"<think>private reasoning</think>\nVisible answer","output":[]}
+    ;
+    const result = try OpenAiCompatibleProvider.extractResponsesText(std.testing.allocator, body);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("Visible answer", result);
 }
 
 test "extractResponsesText nested output_text type" {
