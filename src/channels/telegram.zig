@@ -310,24 +310,6 @@ fn nextPendingMediaDeadline(group_ids: []const ?[]const u8, received_at: []const
     return if (seen) next_deadline else null;
 }
 
-fn pendingTextLatestSeenForKey(
-    id: []const u8,
-    sender: []const u8,
-    pending_messages: []const root.ChannelMessage,
-    received_at: []const u64,
-) ?u64 {
-    const n = @min(pending_messages.len, received_at.len);
-    var seen = false;
-    var latest: u64 = 0;
-    for (0..n) |i| {
-        const msg = pending_messages[i];
-        if (!std.mem.eql(u8, msg.id, id) or !std.mem.eql(u8, msg.sender, sender)) continue;
-        if (!seen or received_at[i] > latest) latest = received_at[i];
-        seen = true;
-    }
-    return if (seen) latest else null;
-}
-
 const PendingTextChainStats = struct {
     latest: u64,
     parts: usize,
