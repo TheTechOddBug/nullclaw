@@ -58,9 +58,12 @@ pub const FileDeleteTool = struct {
             return ToolResult.fail("Path is outside allowed areas");
         }
 
-        const removed = if (!bootstrap_mod.backendUsesFiles(self.backend_name) and self.bootstrap_provider != null) blk: {
-            break :blk try self.bootstrap_provider.?.remove("BOOTSTRAP.md");
-        } else blk: {
+        const removed_from_provider = if (!bootstrap_mod.backendUsesFiles(self.backend_name) and self.bootstrap_provider != null)
+            try self.bootstrap_provider.?.remove("BOOTSTRAP.md")
+        else
+            false;
+
+        const removed_from_disk = blk: {
             std.fs.deleteFileAbsolute(full_path) catch |err| switch (err) {
                 error.FileNotFound => break :blk false,
                 else => {
@@ -70,6 +73,7 @@ pub const FileDeleteTool = struct {
             };
             break :blk true;
         };
+        const removed = removed_from_provider or removed_from_disk;
 
         if (!removed) {
             return ToolResult.fail("BOOTSTRAP.md not found");
@@ -153,4 +157,70 @@ test "file_delete removes sqlite bootstrap and marks onboarding complete" {
     const state_raw = try file.readToEndAlloc(std.testing.allocator, 4096);
     defer std.testing.allocator.free(state_raw);
     try std.testing.expect(std.mem.indexOf(u8, state_raw, "\"onboarding_completed_at\"") != null);
+}
+
+test "file_delete removes sqlite bootstrap disk fallback when DB entry is absent" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const ws_path = try tmp_dir.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(ws_path);
+
+    try tmp_dir.dir.writeFile(.{ .sub_path = "BOOTSTRAP.md", .data = "legacy bootstrap" });
+
+    var lru = @import("../memory/root.zig").InMemoryLruMemory.init(std.testing.allocator, 16);
+    defer lru.deinit();
+    var bp_impl = @import("../bootstrap/root.zig").MemoryBootstrapProvider.init(std.testing.allocator, lru.memory(), ws_path);
+    const provider = bp_impl.provider();
+
+    var ft = FileDeleteTool{
+        .workspace_dir = ws_path,
+        .allowed_paths = &.{ws_path},
+        .bootstrap_provider = provider,
+        .backend_name = "sqlite",
+    };
+    const t = ft.tool();
+    const parsed = try root.parseTestArgs("{\"path\": \"BOOTSTRAP.md\"}");
+    defer parsed.deinit();
+
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    defer if (result.error_msg) |e| std.testing.allocator.free(e);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings("Deleted BOOTSTRAP.md", result.output);
+    try std.testing.expect(!provider.exists("BOOTSTRAP.md"));
+    try std.testing.expectError(error.FileNotFound, tmp_dir.dir.openFile("BOOTSTRAP.md", .{}));
+}
+
+test "file_delete removes sqlite bootstrap from DB and disk fallback together" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const ws_path = try tmp_dir.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(ws_path);
+
+    try tmp_dir.dir.writeFile(.{ .sub_path = "BOOTSTRAP.md", .data = "legacy bootstrap" });
+
+    var lru = @import("../memory/root.zig").InMemoryLruMemory.init(std.testing.allocator, 16);
+    defer lru.deinit();
+    var bp_impl = @import("../bootstrap/root.zig").MemoryBootstrapProvider.init(std.testing.allocator, lru.memory(), ws_path);
+    const provider = bp_impl.provider();
+    try provider.store("BOOTSTRAP.md", "fresh bootstrap");
+
+    var ft = FileDeleteTool{
+        .workspace_dir = ws_path,
+        .allowed_paths = &.{ws_path},
+        .bootstrap_provider = provider,
+        .backend_name = "sqlite",
+    };
+    const t = ft.tool();
+    const parsed = try root.parseTestArgs("{\"path\": \"BOOTSTRAP.md\"}");
+    defer parsed.deinit();
+
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    defer if (result.error_msg) |e| std.testing.allocator.free(e);
+
+    try std.testing.expect(result.success);
+    try std.testing.expect(!provider.exists("BOOTSTRAP.md"));
+    try std.testing.expectError(error.FileNotFound, tmp_dir.dir.openFile("BOOTSTRAP.md", .{}));
 }
