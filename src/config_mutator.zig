@@ -242,7 +242,10 @@ test "defaultConfigPath appends config filename to NULLCLAW_HOME override" {
     const config_path = try defaultConfigPathFromDir(allocator, "/tmp/nullclaw-home");
     defer allocator.free(config_path);
 
-    try std.testing.expectEqualStrings("/tmp/nullclaw-home/config.json", config_path);
+    const expected = try std.fmt.allocPrint(allocator, "/tmp/nullclaw-home{s}config.json", .{std.fs.path.sep_str});
+    defer allocator.free(expected);
+
+    try std.testing.expectEqualStrings(expected, config_path);
 }
 
 fn writeAtomic(allocator: std.mem.Allocator, path: []const u8, content: []const u8) !void {
