@@ -2190,9 +2190,25 @@ fn runOnboard(allocator: std.mem.Allocator, sub_args: []const []const u8) !void 
     };
 
     switch (parsed.mode) {
-        .channels_only => try yc.onboard.runChannelsOnly(allocator),
-        .interactive => try yc.onboard.runWizard(allocator),
+        .channels_only => yc.onboard.runChannelsOnly(allocator) catch |err| switch (err) {
+            error.InsecurePlaintextSecrets => {
+                yc.config.Config.printValidationError(error.InsecurePlaintextSecrets);
+                std.process.exit(1);
+            },
+            else => return err,
+        },
+        .interactive => yc.onboard.runWizard(allocator) catch |err| switch (err) {
+            error.InsecurePlaintextSecrets => {
+                yc.config.Config.printValidationError(error.InsecurePlaintextSecrets);
+                std.process.exit(1);
+            },
+            else => return err,
+        },
         .quick => yc.onboard.runQuickSetup(allocator, parsed.api_key, parsed.provider, parsed.model, parsed.memory_backend) catch |err| switch (err) {
+            error.InsecurePlaintextSecrets => {
+                yc.config.Config.printValidationError(error.InsecurePlaintextSecrets);
+                std.process.exit(1);
+            },
             error.UnknownProvider => {
                 const requested = parsed.provider orelse "(missing)";
                 std.debug.print("Unknown provider '{s}' for quick setup.\n", .{requested});
