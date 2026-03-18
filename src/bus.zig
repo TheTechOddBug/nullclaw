@@ -44,6 +44,7 @@ pub const OutboundMessage = struct {
     media: []const []const u8 = &.{}, // file paths/URLs to send
     choices: []const outbound.Choice = &.{}, // structured action choices for rich-capable channels
     stage: streaming.OutboundStage = .final,
+    draft_id: u64 = 0, // host-managed tracked draft turn id; 0 means no tracked draft
 
     pub fn deinit(self: *const OutboundMessage, allocator: Allocator) void {
         for (self.media) |m| allocator.free(m);
@@ -576,6 +577,7 @@ test "makeOutbound produces owned copies" {
     src_content[0] = 'Z';
     try testing.expectEqualStrings("reply", msg.content);
     try testing.expect(msg.stage == .final);
+    try testing.expectEqual(@as(u64, 0), msg.draft_id);
 }
 
 test "makeOutboundWithAccount stores account_id" {
@@ -585,6 +587,7 @@ test "makeOutboundWithAccount stores account_id" {
     try testing.expect(msg.account_id != null);
     try testing.expectEqualStrings("backup", msg.account_id.?);
     try testing.expect(msg.stage == .final);
+    try testing.expectEqual(@as(u64, 0), msg.draft_id);
 }
 
 test "makeOutboundChunk marks chunk stage" {
@@ -592,6 +595,7 @@ test "makeOutboundChunk marks chunk stage" {
     const msg = try makeOutboundChunk(alloc, "web", "c1", "delta");
     defer msg.deinit(alloc);
     try testing.expect(msg.stage == .chunk);
+    try testing.expectEqual(@as(u64, 0), msg.draft_id);
 }
 
 test "makeOutboundChunkWithAccount marks chunk stage" {
@@ -600,6 +604,7 @@ test "makeOutboundChunkWithAccount marks chunk stage" {
     defer msg.deinit(alloc);
     try testing.expect(msg.stage == .chunk);
     try testing.expectEqualStrings("main", msg.account_id.?);
+    try testing.expectEqual(@as(u64, 0), msg.draft_id);
 }
 
 test "makeOutboundWithChoices stores structured choices" {

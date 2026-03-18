@@ -74,6 +74,10 @@ Typical next steps:
    - `capabilities.streaming`
    - `capabilities.send_rich`
    - `capabilities.typing`
+   - `capabilities.edit`
+   - `capabilities.delete`
+   - `capabilities.reactions`
+   - `capabilities.read_receipts`
 
 ## Minimal Development Notes
 
@@ -81,8 +85,13 @@ Typical next steps:
 - stderr is safe for logs
 - `message.text` is the canonical text field
 - accepted outbound actions must return `{"accepted": true}`
+- if you enable host-managed edits/deletes, `send` should also return a stable
+  `message_id` (or `message { target?, message_id }`) so the host can follow up
+  with `edit_message` / `delete_message`
 - if you emit inbound messages, include `peer_kind` and `peer_id` in metadata
   whenever routing/session separation matters
+- optional message action RPCs are `edit_message`, `delete_message`,
+  `set_reaction`, and `mark_read`
 
 For the full protocol contract, see:
 

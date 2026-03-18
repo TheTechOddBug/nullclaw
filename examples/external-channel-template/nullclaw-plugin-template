@@ -82,6 +82,10 @@ class ExternalChannelTemplate:
                     "streaming": False,
                     "send_rich": False,
                     "typing": False,
+                    "edit": False,
+                    "delete": False,
+                    "reactions": False,
+                    "read_receipts": False,
                 },
             }
         if method == "start":
@@ -152,6 +156,9 @@ class ExternalChannelTemplate:
         self.log(f"send target={target} stage={stage} text={text!r}")
 
         # Replace this with your real outbound delivery logic.
+        # If you later advertise edit/delete support, also return a stable
+        # message_id here so the host can call edit_message/delete_message.
+        # Example: {"accepted": True, "message_id": "platform-message-id"}
         return {"accepted": True}
 
     def emit_inbound_message(

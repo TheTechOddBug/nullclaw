@@ -156,7 +156,11 @@ The plugin must respond with:
       "health": true,
       "streaming": false,
       "send_rich": false,
-      "typing": false
+      "typing": false,
+      "edit": false,
+      "delete": false,
+      "reactions": false,
+      "read_receipts": false
     }
   }
 }
@@ -178,6 +182,14 @@ Capability meanings:
   The plugin implements `send_rich`.
 - `typing`
   The plugin implements `start_typing` and `stop_typing`.
+- `edit`
+  The plugin implements `edit_message` for host-managed follow-up updates.
+- `delete`
+  The plugin implements `delete_message` for host-managed cleanup.
+- `reactions`
+  The plugin implements `set_reaction`.
+- `read_receipts`
+  The plugin implements `mark_read`.
 
 ## Lifecycle RPCs
 
@@ -287,6 +299,20 @@ Required success response:
 {"jsonrpc":"2.0","id":5,"result":{"accepted":true}}
 ```
 
+If the plugin advertises both `capabilities.edit=true` and
+`capabilities.delete=true`, `send` may also return a stable message ref so the
+host can update or remove the same message later:
+
+```json
+{"jsonrpc":"2.0","id":5,"result":{"accepted":true,"message_id":"msg-42"}}
+```
+
+or
+
+```json
+{"jsonrpc":"2.0","id":5,"result":{"accepted":true,"message":{"target":"room-1","message_id":"msg-42"}}}
+```
+
 Rules:
 
 - `message.target` is plugin-defined channel destination data
@@ -294,6 +320,12 @@ Rules:
 - `message.stage` is `"final"` or `"chunk"`
 - `message.media` is an array of strings
 - if the plugin cannot or will not accept the send, it must not fake success
+- when using host-managed follow-up edits/deletes, `message_id` must be a
+  non-empty stable platform identifier
+- `result.message.target` is optional; if omitted, the host reuses the original
+  outbound target
+- plugins that do not advertise `edit` + `delete` may return only
+  `{"accepted": true}`
 
 The host now distinguishes:
 
@@ -357,6 +389,138 @@ Attachment `kind` values:
 If `send_rich` is unsupported, leave the capability bit unset. The host may
 fall back to plain `send` only when the payload is simple enough.
 
+### `edit_message`
+
+Only used when `capabilities.edit=true`.
+
+Host request:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "edit_message",
+  "params": {
+    "runtime": {
+      "name": "plugin_chat",
+      "account_id": "main"
+    },
+    "message": {
+      "target": "room-1",
+      "message_id": "msg-42",
+      "text": "patched",
+      "attachments": [],
+      "choices": []
+    }
+  }
+}
+```
+
+Required success response:
+
+```json
+{"jsonrpc":"2.0","id":7,"result":{"accepted":true}}
+```
+
+The host may use this after an earlier `send` when keeping a tracked draft up
+to date on a channel that does not support native `.chunk` streaming.
+
+### `delete_message`
+
+Only used when `capabilities.delete=true`.
+
+Host request:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "method": "delete_message",
+  "params": {
+    "runtime": {
+      "name": "plugin_chat",
+      "account_id": "main"
+    },
+    "message": {
+      "target": "room-1",
+      "message_id": "msg-42"
+    }
+  }
+}
+```
+
+Required success response:
+
+```json
+{"jsonrpc":"2.0","id":8,"result":{"accepted":true}}
+```
+
+### `set_reaction`
+
+Only used when `capabilities.reactions=true`.
+
+Host request:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "method": "set_reaction",
+  "params": {
+    "runtime": {
+      "name": "plugin_chat",
+      "account_id": "main"
+    },
+    "message": {
+      "target": "room-1",
+      "message_id": "msg-42",
+      "emoji": "✅"
+    }
+  }
+}
+```
+
+Required success response:
+
+```json
+{"jsonrpc":"2.0","id":9,"result":{"accepted":true}}
+```
+
+Rules:
+
+- `emoji` must be a string to set/update a reaction
+- `emoji: null` means clear the reaction for that message
+
+### `mark_read`
+
+Only used when `capabilities.read_receipts=true`.
+
+Host request:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 10,
+  "method": "mark_read",
+  "params": {
+    "runtime": {
+      "name": "plugin_chat",
+      "account_id": "main"
+    },
+    "message": {
+      "target": "room-1",
+      "message_id": "msg-42"
+    }
+  }
+}
+```
+
+Required success response:
+
+```json
+{"jsonrpc":"2.0","id":10,"result":{"accepted":true}}
+```
+
 ### Typing RPCs
 
 Only used when `capabilities.typing=true`.
@@ -364,17 +528,17 @@ Only used when `capabilities.typing=true`.
 Requests:
 
 ```json
-{"jsonrpc":"2.0","id":7,"method":"start_typing","params":{"runtime":{"name":"plugin_chat","account_id":"main"},"recipient":"room-1"}}
+{"jsonrpc":"2.0","id":11,"method":"start_typing","params":{"runtime":{"name":"plugin_chat","account_id":"main"},"recipient":"room-1"}}
 ```
 
 ```json
-{"jsonrpc":"2.0","id":8,"method":"stop_typing","params":{"runtime":{"name":"plugin_chat","account_id":"main"},"recipient":"room-1"}}
+{"jsonrpc":"2.0","id":12,"method":"stop_typing","params":{"runtime":{"name":"plugin_chat","account_id":"main"},"recipient":"room-1"}}
 ```
 
 Required success response:
 
 ```json
-{"jsonrpc":"2.0","id":7,"result":{"accepted":true}}
+{"jsonrpc":"2.0","id":13,"result":{"accepted":true}}
 ```
 
 ## Inbound Notifications
@@ -536,14 +700,16 @@ bridge, use:
 
 Companion out-of-tree repositories:
 
-- `nullclaw-channel-whatsmeow-bridge`
-  Production-oriented Go/whatsmeow bridge with QR, pairing-code, and
-  deployment assets.
-- `nullclaw-channel-baileys`
+- [nullclaw/nullclaw-channel-baileys](https://github.com/nullclaw/nullclaw-channel-baileys)
   Direct Node/Baileys external channel plugin with QR and pairing-code flows.
+- [nullclaw/nullclaw-channel-whatsmeow-bridge](https://github.com/nullclaw/nullclaw-channel-whatsmeow-bridge)
+  Standalone Go/whatsmeow HTTP bridge with QR, pairing-code, and deployment assets.
 - `nullclaw-channel-imap-connector`
   Python IMAP/SMTP external channel plugin for bidirectional email plus
   companion mailbox CLI workflows.
+
+Those repositories are the recommended place for production channel-specific
+code. The in-tree examples here are reference adapters and templates.
 
 ## Plugin Author Checklist
 

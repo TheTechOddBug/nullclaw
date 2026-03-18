@@ -97,10 +97,38 @@ pub const Channel = struct {
     pub const OutboundAttachment = outbound.Attachment;
     pub const OutboundChoice = outbound.Choice;
     pub const OutboundPayload = outbound.Payload;
+    pub const MessageRef = struct {
+        target: []const u8,
+        message_id: []const u8,
+
+        pub fn deinit(self: *const MessageRef, allocator: std.mem.Allocator) void {
+            allocator.free(self.target);
+            allocator.free(self.message_id);
+        }
+    };
+    pub const MessageEdit = struct {
+        target: []const u8,
+        message_id: []const u8,
+        payload: OutboundPayload,
+    };
+    pub const ReactionUpdate = struct {
+        target: []const u8,
+        message_id: []const u8,
+        emoji: ?[]const u8 = null,
+    };
 
     fn defaultStartTyping(_: *anyopaque, _: []const u8) anyerror!void {}
     fn defaultStopTyping(_: *anyopaque, _: []const u8) anyerror!void {}
+    fn defaultSetReaction(_: *anyopaque, _: ReactionUpdate) anyerror!void {
+        return error.NotSupported;
+    }
+    fn defaultMarkRead(_: *anyopaque, _: MessageRef) anyerror!void {
+        return error.NotSupported;
+    }
     fn defaultSupportsStreamingOutbound(_: *anyopaque) bool {
+        return false;
+    }
+    fn defaultSupportsTrackedDrafts(_: *anyopaque) bool {
         return false;
     }
 
@@ -131,12 +159,28 @@ pub const Channel = struct {
             target: []const u8,
             payload: OutboundPayload,
         ) anyerror!void = null,
+        /// Optional plain-text send that returns a stable platform message ref.
+        sendTracked: ?*const fn (
+            ptr: *anyopaque,
+            target: []const u8,
+            message: []const u8,
+        ) anyerror!?MessageRef = null,
         /// Start processing indicator for a recipient (e.g., typing status).
         startTyping: *const fn (ptr: *anyopaque, recipient: []const u8) anyerror!void = &defaultStartTyping,
         /// Stop processing indicator for a recipient.
         stopTyping: *const fn (ptr: *anyopaque, recipient: []const u8) anyerror!void = &defaultStopTyping,
+        /// Edit an already-sent message in-place.
+        editMessage: ?*const fn (ptr: *anyopaque, edit: MessageEdit) anyerror!void = null,
+        /// Delete an existing message from the target conversation.
+        deleteMessage: ?*const fn (ptr: *anyopaque, message_ref: MessageRef) anyerror!void = null,
+        /// Set or clear a reaction on an existing message. `emoji=null` clears it.
+        setReaction: *const fn (ptr: *anyopaque, update: ReactionUpdate) anyerror!void = &defaultSetReaction,
+        /// Mark the referenced message as read.
+        markRead: *const fn (ptr: *anyopaque, message_ref: MessageRef) anyerror!void = &defaultMarkRead,
         /// Whether the channel can consume `.chunk` staged outbound events.
         supportsStreamingOutbound: *const fn (ptr: *anyopaque) bool = &defaultSupportsStreamingOutbound,
+        /// Whether the channel can create, edit, and delete host-managed draft messages.
+        supportsTrackedDrafts: *const fn (ptr: *anyopaque) bool = &defaultSupportsTrackedDrafts,
     };
 
     pub fn start(self: Channel) !void {
@@ -168,6 +212,14 @@ pub const Channel = struct {
         return error.NotSupported;
     }
 
+    pub fn sendTracked(self: Channel, target: []const u8, message: []const u8) !?MessageRef {
+        if (self.vtable.sendTracked) |fn_send_tracked| {
+            return fn_send_tracked(self.ptr, target, message);
+        }
+        try self.send(target, message, &.{});
+        return null;
+    }
+
     pub fn name(self: Channel) []const u8 {
         return self.vtable.name(self.ptr);
     }
@@ -184,8 +236,34 @@ pub const Channel = struct {
         return self.vtable.stopTyping(self.ptr, recipient);
     }
 
+    pub fn editMessage(self: Channel, edit: MessageEdit) !void {
+        if (self.vtable.editMessage) |fn_edit_message| {
+            return fn_edit_message(self.ptr, edit);
+        }
+        return error.NotSupported;
+    }
+
+    pub fn deleteMessage(self: Channel, message_ref: MessageRef) !void {
+        if (self.vtable.deleteMessage) |fn_delete_message| {
+            return fn_delete_message(self.ptr, message_ref);
+        }
+        return error.NotSupported;
+    }
+
+    pub fn setReaction(self: Channel, update: ReactionUpdate) !void {
+        return self.vtable.setReaction(self.ptr, update);
+    }
+
+    pub fn markRead(self: Channel, message_ref: MessageRef) !void {
+        return self.vtable.markRead(self.ptr, message_ref);
+    }
+
     pub fn supportsStreamingOutbound(self: Channel) bool {
         return self.vtable.supportsStreamingOutbound(self.ptr);
+    }
+
+    pub fn supportsTrackedDrafts(self: Channel) bool {
+        return self.vtable.supportsTrackedDrafts(self.ptr);
     }
 };
 
@@ -935,6 +1013,167 @@ test "Channel sendRich prefers structured vtable when available" {
     try std.testing.expectEqualStrings("chat-2", mock.rich_target.?);
     try std.testing.expectEqualStrings("foto", mock.rich_text.?);
     try std.testing.expectEqual(@as(usize, 1), mock.rich_attachment_count);
+}
+
+test "Channel message operations default to not supported" {
+    const Mock = struct {
+        fn start(_: *anyopaque) anyerror!void {}
+        fn stop(_: *anyopaque) void {}
+        fn send(_: *anyopaque, _: []const u8, _: []const u8, _: []const []const u8) anyerror!void {}
+        fn name(_: *anyopaque) []const u8 {
+            return "mock";
+        }
+        fn health(_: *anyopaque) bool {
+            return true;
+        }
+
+        const vtable = Channel.VTable{
+            .start = &start,
+            .stop = &stop,
+            .send = &send,
+            .name = &name,
+            .healthCheck = &health,
+        };
+    };
+
+    var mock = Mock{};
+    const channel = Channel{ .ptr = @ptrCast(&mock), .vtable = &Mock.vtable };
+
+    try std.testing.expect(!channel.supportsTrackedDrafts());
+    const tracked = try channel.sendTracked("chat-1", "hello");
+    try std.testing.expect(tracked == null);
+    try std.testing.expectError(error.NotSupported, channel.setReaction(.{
+        .target = "chat-1",
+        .message_id = "m-1",
+        .emoji = ":+1:",
+    }));
+    try std.testing.expectError(error.NotSupported, channel.editMessage(.{
+        .target = "chat-1",
+        .message_id = "m-1",
+        .payload = .{ .text = "updated" },
+    }));
+    try std.testing.expectError(error.NotSupported, channel.deleteMessage(.{
+        .target = "chat-1",
+        .message_id = "m-1",
+    }));
+    try std.testing.expectError(error.NotSupported, channel.markRead(.{
+        .target = "chat-1",
+        .message_id = "m-1",
+    }));
+}
+
+test "Channel message operations dispatch through vtable" {
+    const Mock = struct {
+        tracked_target: ?[]const u8 = null,
+        tracked_message: ?[]const u8 = null,
+        reaction_target: ?[]const u8 = null,
+        reaction_message_id: ?[]const u8 = null,
+        reaction_emoji: ??[]const u8 = null,
+        edit_target: ?[]const u8 = null,
+        edit_message_id: ?[]const u8 = null,
+        edit_text: ?[]const u8 = null,
+        delete_target: ?[]const u8 = null,
+        delete_message_id: ?[]const u8 = null,
+        read_target: ?[]const u8 = null,
+        read_message_id: ?[]const u8 = null,
+
+        fn start(_: *anyopaque) anyerror!void {}
+        fn stop(_: *anyopaque) void {}
+        fn send(_: *anyopaque, _: []const u8, _: []const u8, _: []const []const u8) anyerror!void {}
+        fn name(_: *anyopaque) []const u8 {
+            return "mock";
+        }
+        fn health(_: *anyopaque) bool {
+            return true;
+        }
+        fn supportsTrackedDrafts(_: *anyopaque) bool {
+            return true;
+        }
+        fn sendTracked(ptr: *anyopaque, target: []const u8, message: []const u8) anyerror!?Channel.MessageRef {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.tracked_target = target;
+            self.tracked_message = message;
+            return .{
+                .target = target,
+                .message_id = "tracked-1",
+            };
+        }
+        fn setReaction(ptr: *anyopaque, update: Channel.ReactionUpdate) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.reaction_target = update.target;
+            self.reaction_message_id = update.message_id;
+            self.reaction_emoji = update.emoji;
+        }
+        fn editMessage(ptr: *anyopaque, edit: Channel.MessageEdit) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.edit_target = edit.target;
+            self.edit_message_id = edit.message_id;
+            self.edit_text = edit.payload.text;
+        }
+        fn deleteMessage(ptr: *anyopaque, message_ref: Channel.MessageRef) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.delete_target = message_ref.target;
+            self.delete_message_id = message_ref.message_id;
+        }
+        fn markRead(ptr: *anyopaque, message_ref: Channel.MessageRef) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.read_target = message_ref.target;
+            self.read_message_id = message_ref.message_id;
+        }
+
+        const vtable = Channel.VTable{
+            .start = &start,
+            .stop = &stop,
+            .send = &send,
+            .name = &name,
+            .healthCheck = &health,
+            .sendTracked = &sendTracked,
+            .editMessage = &editMessage,
+            .deleteMessage = &deleteMessage,
+            .setReaction = &setReaction,
+            .markRead = &markRead,
+            .supportsTrackedDrafts = &supportsTrackedDrafts,
+        };
+    };
+
+    var mock = Mock{};
+    const channel = Channel{ .ptr = @ptrCast(&mock), .vtable = &Mock.vtable };
+
+    try std.testing.expect(channel.supportsTrackedDrafts());
+    const tracked = (try channel.sendTracked("chat-2", "draft")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("chat-2", tracked.target);
+    try std.testing.expectEqualStrings("tracked-1", tracked.message_id);
+    try channel.editMessage(.{
+        .target = "chat-2",
+        .message_id = "m-1",
+        .payload = .{ .text = "updated" },
+    });
+    try channel.deleteMessage(.{
+        .target = "chat-2",
+        .message_id = "m-2",
+    });
+    try channel.setReaction(.{
+        .target = "chat-2",
+        .message_id = "m-3",
+        .emoji = "done",
+    });
+    try channel.markRead(.{
+        .target = "chat-2",
+        .message_id = "m-4",
+    });
+
+    try std.testing.expectEqualStrings("chat-2", mock.tracked_target.?);
+    try std.testing.expectEqualStrings("draft", mock.tracked_message.?);
+    try std.testing.expectEqualStrings("chat-2", mock.edit_target.?);
+    try std.testing.expectEqualStrings("m-1", mock.edit_message_id.?);
+    try std.testing.expectEqualStrings("updated", mock.edit_text.?);
+    try std.testing.expectEqualStrings("chat-2", mock.delete_target.?);
+    try std.testing.expectEqualStrings("m-2", mock.delete_message_id.?);
+    try std.testing.expectEqualStrings("chat-2", mock.reaction_target.?);
+    try std.testing.expectEqualStrings("m-3", mock.reaction_message_id.?);
+    try std.testing.expectEqualStrings("done", mock.reaction_emoji.?.?);
+    try std.testing.expectEqualStrings("chat-2", mock.read_target.?);
+    try std.testing.expectEqualStrings("m-4", mock.read_message_id.?);
 }
 
 test {

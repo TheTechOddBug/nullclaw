@@ -41,6 +41,7 @@ const HEARTBEAT_THREAD_STACK_SIZE: usize = thread_stacks.SESSION_TURN_STACK_SIZE
 
 /// Maximum number of supervised components.
 const MAX_COMPONENTS: usize = 8;
+var outbound_draft_id_counter: std.atomic.Value(u64) = std.atomic.Value(u64).init(1);
 
 /// Component status for state file serialization.
 pub const ComponentStatus = struct {
@@ -723,6 +724,29 @@ fn resolveOutboundChannel(
         registry.findByName(channel_name);
 }
 
+fn buildInboundMessageRef(
+    msg: *const bus_mod.InboundMessage,
+    meta: channel_adapters.InboundMetadata,
+) ?channels_mod.Channel.MessageRef {
+    const message_id = meta.message_id orelse return null;
+    if (msg.chat_id.len == 0 or message_id.len == 0) return null;
+    return .{
+        .target = msg.chat_id,
+        .message_id = message_id,
+    };
+}
+
+fn markInboundMessageRead(
+    channel: channels_mod.Channel,
+    message_ref: ?channels_mod.Channel.MessageRef,
+) void {
+    const ref = message_ref orelse return;
+    channel.markRead(ref) catch |err| switch (err) {
+        error.NotSupported => {},
+        else => log.debug("inbound markRead failed: {}", .{err}),
+    };
+}
+
 fn sendInboundProcessingIndicator(
     allocator: std.mem.Allocator,
     registry: *const dispatch.ChannelRegistry,
@@ -760,7 +784,13 @@ const StreamingOutboundCtx = struct {
     channel: []const u8,
     account_id: ?[]const u8,
     chat_id: []const u8,
+    draft_id: u64 = 0,
+    emitted_chunk: bool = false,
 };
+
+fn nextOutboundDraftId() u64 {
+    return outbound_draft_id_counter.fetchAdd(1, .monotonic);
+}
 
 fn publishStreamingChunk(ctx_ptr: *anyopaque, event: streaming.Event) void {
     if (event.stage != .chunk or event.text.len == 0) return;
@@ -775,12 +805,15 @@ fn publishStreamingChunk(ctx_ptr: *anyopaque, event: streaming.Event) void {
         log.warn("inbound dispatch chunk makeOutbound failed: {}", .{err});
         return;
     };
+    message.draft_id = ctx.draft_id;
     ctx.event_bus.publishOutbound(message) catch |err| {
         message.deinit(ctx.allocator);
         if (err != error.Closed) {
             log.warn("inbound dispatch chunk publishOutbound failed: {}", .{err});
         }
+        return;
     };
+    ctx.emitted_chunk = true;
 }
 
 fn makeAssistantReplyOutbound(
@@ -789,28 +822,35 @@ fn makeAssistantReplyOutbound(
     account_id: ?[]const u8,
     chat_id: []const u8,
     reply: []const u8,
+    draft_id: u64,
 ) !bus_mod.OutboundMessage {
     if (std.mem.indexOf(u8, reply, interaction_choices.START_TAG) == null) {
-        return if (account_id) |aid|
-            bus_mod.makeOutboundWithAccount(allocator, channel, aid, chat_id, reply)
+        var msg = if (account_id) |aid|
+            try bus_mod.makeOutboundWithAccount(allocator, channel, aid, chat_id, reply)
         else
-            bus_mod.makeOutbound(allocator, channel, chat_id, reply);
+            try bus_mod.makeOutbound(allocator, channel, chat_id, reply);
+        msg.draft_id = draft_id;
+        return msg;
     }
 
     var parsed = try interaction_choices.parseAssistantChoices(allocator, reply);
     defer parsed.deinit(allocator);
 
     if (parsed.choices) |choices| {
-        return if (account_id) |aid|
-            bus_mod.makeOutboundWithAccountChoices(allocator, channel, aid, chat_id, parsed.visible_text, choices.options)
+        var msg = if (account_id) |aid|
+            try bus_mod.makeOutboundWithAccountChoices(allocator, channel, aid, chat_id, parsed.visible_text, choices.options)
         else
-            bus_mod.makeOutboundWithChoices(allocator, channel, chat_id, parsed.visible_text, choices.options);
+            try bus_mod.makeOutboundWithChoices(allocator, channel, chat_id, parsed.visible_text, choices.options);
+        msg.draft_id = draft_id;
+        return msg;
     }
 
-    return if (account_id) |aid|
-        bus_mod.makeOutboundWithAccount(allocator, channel, aid, chat_id, parsed.visible_text)
+    var msg = if (account_id) |aid|
+        try bus_mod.makeOutboundWithAccount(allocator, channel, aid, chat_id, parsed.visible_text)
     else
-        bus_mod.makeOutbound(allocator, channel, chat_id, parsed.visible_text);
+        try bus_mod.makeOutbound(allocator, channel, chat_id, parsed.visible_text);
+    msg.draft_id = draft_id;
+    return msg;
 }
 
 fn makeStreamingSinkForChannel(
@@ -865,16 +905,25 @@ fn inboundDispatcherThread(
         );
 
         const outbound_channel = resolveOutboundChannel(registry, msg.channel, outbound_account_id);
-        const use_streaming_outbound = if (outbound_channel) |channel|
-            channel.supportsStreamingOutbound()
+        if (outbound_channel) |channel| {
+            markInboundMessageRead(channel, buildInboundMessageRef(&msg, parsed_meta.fields));
+        }
+        const use_tracked_draft_outbound = if (outbound_channel) |channel|
+            !channel.supportsStreamingOutbound() and dispatch.supportsDraftStreaming(channel)
         else
             false;
+        const use_streaming_outbound = if (outbound_channel) |channel|
+            channel.supportsStreamingOutbound() or dispatch.supportsDraftStreaming(channel)
+        else
+            false;
+        const outbound_draft_id: u64 = if (use_tracked_draft_outbound) nextOutboundDraftId() else 0;
         var streaming_ctx = StreamingOutboundCtx{
             .allocator = allocator,
             .event_bus = event_bus,
             .channel = msg.channel,
             .account_id = outbound_account_id,
             .chat_id = msg.chat_id,
+            .draft_id = outbound_draft_id,
         };
         var stream_sink: ?streaming.Sink = null;
         var outbound_tag_filter: streaming.TagFilter = undefined;
@@ -909,10 +958,11 @@ fn inboundDispatcherThread(
                 error.OutOfMemory => "Out of memory.",
                 else => "An error occurred. Try again.",
             };
-            const err_out = if (outbound_account_id) |aid|
+            var err_out = if (outbound_account_id) |aid|
                 bus_mod.makeOutboundWithAccount(allocator, msg.channel, aid, msg.chat_id, err_msg) catch continue
             else
                 bus_mod.makeOutbound(allocator, msg.channel, msg.chat_id, err_msg) catch continue;
+            err_out.draft_id = outbound_draft_id;
             event_bus.publishOutbound(err_out) catch {
                 err_out.deinit(allocator);
             };
@@ -926,6 +976,7 @@ fn inboundDispatcherThread(
             outbound_account_id,
             msg.chat_id,
             reply,
+            outbound_draft_id,
         ) catch |err| {
             log.err("inbound dispatch makeOutbound failed: {}", .{err});
             continue;
@@ -2138,12 +2189,13 @@ test "buildInboundConversationContext uses standardized peer metadata for extern
 
 test "makeAssistantReplyOutbound preserves plain replies without choices" {
     const allocator = std.testing.allocator;
-    var msg = try makeAssistantReplyOutbound(allocator, "telegram", null, "chat1", "hello");
+    var msg = try makeAssistantReplyOutbound(allocator, "telegram", null, "chat1", "hello", 0);
     defer msg.deinit(allocator);
 
     try std.testing.expectEqualStrings("hello", msg.content);
     try std.testing.expectEqual(@as(usize, 0), msg.choices.len);
     try std.testing.expect(msg.account_id == null);
+    try std.testing.expectEqual(@as(u64, 0), msg.draft_id);
 }
 
 test "makeAssistantReplyOutbound extracts structured choices from assistant reply" {
@@ -2152,7 +2204,7 @@ test "makeAssistantReplyOutbound extracts structured choices from assistant repl
         \\Choose one:
         \\<nc_choices>{"v":1,"options":[{"id":"yes","label":"Yes","submit_text":"yes"},{"id":"no","label":"No"}]}</nc_choices>
     ;
-    var msg = try makeAssistantReplyOutbound(allocator, "telegram", "backup", "chat1", reply);
+    var msg = try makeAssistantReplyOutbound(allocator, "telegram", "backup", "chat1", reply, 17);
     defer msg.deinit(allocator);
 
     try std.testing.expectEqualStrings("backup", msg.account_id.?);
@@ -2160,6 +2212,7 @@ test "makeAssistantReplyOutbound extracts structured choices from assistant repl
     try std.testing.expectEqual(@as(usize, 2), msg.choices.len);
     try std.testing.expectEqualStrings("yes", msg.choices[0].id);
     try std.testing.expectEqualStrings("No", msg.choices[1].label);
+    try std.testing.expectEqual(@as(u64, 17), msg.draft_id);
 }
 
 test "resolveSlackStatusTarget prefers thread_id then falls back to message_id" {
@@ -2178,6 +2231,60 @@ test "resolveSlackStatusTarget prefers thread_id then falls back to message_id" 
     }, "C123");
     try std.testing.expect(with_message_only != null);
     try std.testing.expectEqualStrings("1700.1", with_message_only.?.thread_ts);
+}
+
+test "buildInboundMessageRef uses inbound chat target and metadata message id" {
+    const msg = bus_mod.InboundMessage{
+        .channel = "external",
+        .sender_id = "user-1",
+        .chat_id = "room-9",
+        .content = "hello",
+        .session_key = "external:room-9",
+    };
+    const message_ref = buildInboundMessageRef(&msg, .{ .message_id = "msg-42" }) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("room-9", message_ref.target);
+    try std.testing.expectEqualStrings("msg-42", message_ref.message_id);
+}
+
+test "markInboundMessageRead dispatches through channel vtable" {
+    const Mock = struct {
+        target: ?[]const u8 = null,
+        message_id: ?[]const u8 = null,
+
+        fn start(_: *anyopaque) anyerror!void {}
+        fn stop(_: *anyopaque) void {}
+        fn send(_: *anyopaque, _: []const u8, _: []const u8, _: []const []const u8) anyerror!void {}
+        fn name(_: *anyopaque) []const u8 {
+            return "mock";
+        }
+        fn mockHealth(_: *anyopaque) bool {
+            return true;
+        }
+        fn markRead(ptr: *anyopaque, message_ref: channels_mod.Channel.MessageRef) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.target = message_ref.target;
+            self.message_id = message_ref.message_id;
+        }
+
+        const vtable = channels_mod.Channel.VTable{
+            .start = &start,
+            .stop = &stop,
+            .send = &send,
+            .name = &name,
+            .healthCheck = &mockHealth,
+            .markRead = &markRead,
+        };
+    };
+
+    var mock = Mock{};
+    const channel = channels_mod.Channel{ .ptr = @ptrCast(&mock), .vtable = &Mock.vtable };
+    markInboundMessageRead(channel, .{
+        .target = "room-9",
+        .message_id = "msg-42",
+    });
+
+    try std.testing.expectEqualStrings("room-9", mock.target.?);
+    try std.testing.expectEqualStrings("msg-42", mock.message_id.?);
 }
 
 test "hasSupervisedChannels true for nostr" {
