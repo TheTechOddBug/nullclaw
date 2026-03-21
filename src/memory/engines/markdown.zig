@@ -264,13 +264,13 @@ pub const MarkdownMemory = struct {
             }
             try seen_root_paths.put(allocator, canonical, {});
 
-            // Resolve timestamp: parse from filename, else use file mtime.
+            // Resolve timestamp: parse from filename, else use file mtime (converted to seconds).
             const file_timestamp = blk: {
                 const parsed = parseTimestamp(candidate.filename);
                 if (parsed != 0) {
                     break :blk parsed;
                 } else {
-                    break :blk @as(i64, @intCast(stat.mtime));
+                    break :blk @as(i64, @intCast(stat.mtime / std.time.ns_per_s));
                 }
             };
 
@@ -302,7 +302,7 @@ pub const MarkdownMemory = struct {
                     if (parsed != 0) {
                         break :blk parsed;
                     } else {
-                        break :blk @as(i64, @intCast(stat.mtime));
+                        break :blk @as(i64, @intCast(stat.mtime / std.time.ns_per_s));
                     }
                 };
 
