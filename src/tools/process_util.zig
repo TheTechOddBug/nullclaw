@@ -280,15 +280,19 @@ pub fn run(
     try child.spawn();
 
     const effective_cancel_flag = opts.cancel_flag orelse thread_interrupt_flag;
+    const effective_timeout_ns = if (opts.timeout_ns) |limit|
+        if (limit == 0) null else limit
+    else
+        null;
     var cancel_done = AtomicBool.init(false);
     var timed_out = AtomicBool.init(false);
     var cancel_watcher: ?std.Thread = null;
     var watcher_ctx: ProcessWatcherCtx = undefined;
-    if (effective_cancel_flag != null or opts.timeout_ns != null) {
+    if (effective_cancel_flag != null or effective_timeout_ns != null) {
         watcher_ctx = .{
             .child = &child,
             .cancel_flag = effective_cancel_flag,
-            .timeout_ns = opts.timeout_ns,
+            .timeout_ns = effective_timeout_ns,
             .done = &cancel_done,
             .timed_out = &timed_out,
         };
@@ -433,6 +437,20 @@ test "run timeout interrupts child" {
     try std.testing.expect(!result.success);
     try std.testing.expect(!result.interrupted);
     try std.testing.expect(result.timed_out);
+}
+
+test "run zero timeout disables watchdog" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    const result = try run(allocator, &.{ "sh", "-c", "sleep 0.1; echo done" }, .{
+        .timeout_ns = 0,
+    });
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.success);
+    try std.testing.expect(!result.timed_out);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "done") != null);
 }
 
 test "run timeout kills spawned shell descendants" {
