@@ -437,7 +437,6 @@ const claude_cli_fallback = [_][]const u8{
     "claude-opus-4-6",
 };
 
-const MAX_MODELS = 20;
 const MODELS_DEV_URL = "https://models.dev/api.json";
 
 const ModelsDevProvider = struct {
@@ -520,7 +519,6 @@ pub fn fetchModels(allocator: std.mem.Allocator, provider: []const u8, api_key: 
 /// Native list endpoints are preferred when available. For providers without a
 /// native listing API, or when setup lacks credentials, production builds fall
 /// back to the public models.dev catalog before using hardcoded defaults.
-/// Results are limited to MAX_MODELS entries.
 pub fn fetchModelsFromApi(allocator: std.mem.Allocator, provider: []const u8, api_key: ?[]const u8) ![][]const u8 {
     const canonical = canonicalProviderName(provider);
 
@@ -634,7 +632,7 @@ fn fetchModelsFromModelsDev(allocator: std.mem.Allocator, provider: []const u8) 
 fn parseModelsDevModelIds(
     allocator: std.mem.Allocator,
     json_response: []const u8,
-    provider: []const u8,
+    _: []const u8,
     provider_key: []const u8,
 ) ![][]const u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_response, .{}) catch return error.FetchFailed;
@@ -655,13 +653,12 @@ fn parseModelsDevModelIds(
 
     var it = models_val.object.iterator();
     while (it.next()) |entry| {
-        if (result.items.len >= MAX_MODELS) break;
         if (!modelsDevModelSupportsChat(entry.key_ptr.*, entry.value_ptr.*)) continue;
         try result.append(allocator, try allocator.dupe(u8, entry.key_ptr.*));
     }
 
     if (result.items.len == 0) return error.FetchFailed;
-    prioritizeDefaultModel(result.items, defaultModelForProvider(provider));
+    sortModelIds(result.items);
     return result.toOwnedSlice(allocator);
 }
 
@@ -692,17 +689,6 @@ fn jsonStringArrayContains(value: std.json.Value, needle: []const u8) bool {
     return false;
 }
 
-fn prioritizeDefaultModel(models: [][]const u8, default_model: []const u8) void {
-    for (models, 0..) |model, idx| {
-        if (!std.mem.eql(u8, model, default_model)) continue;
-        if (idx == 0) return;
-        const tmp = models[0];
-        models[0] = model;
-        models[idx] = tmp;
-        return;
-    }
-}
-
 fn fetchAndParseModels(allocator: std.mem.Allocator, url: []const u8, headers: []const []const u8, prefix_filter: ?[]const u8) ![][]const u8 {
     const response = http_util.curlGet(allocator, url, headers, "10") catch return error.FetchFailed;
     defer allocator.free(response);
@@ -725,7 +711,6 @@ fn fetchAndParseModels(allocator: std.mem.Allocator, url: []const u8, headers: [
     }
 
     for (data.array.items) |item| {
-        if (result.items.len >= MAX_MODELS) break;
         if (item != .object) continue;
         const id_val = item.object.get("id") orelse continue;
         if (id_val != .string) continue;
@@ -737,6 +722,7 @@ fn fetchAndParseModels(allocator: std.mem.Allocator, url: []const u8, headers: [
     }
 
     if (result.items.len == 0) return error.FetchFailed;
+    sortModelIds(result.items);
     return result.toOwnedSlice(allocator);
 }
 
@@ -886,6 +872,7 @@ pub fn parseModelIds(allocator: std.mem.Allocator, json_response: []const u8) ![
         try result.append(allocator, try allocator.dupe(u8, id_val.string));
     }
 
+    sortModelIds(result.items);
     return result.toOwnedSlice(allocator);
 }
 
@@ -1127,6 +1114,58 @@ fn promptChoice(out: *std.Io.Writer, buf: []u8, max: usize, default_idx: usize) 
     const num = std.fmt.parseInt(usize, line, 10) catch return default_idx;
     if (num < 1 or num > max) return default_idx;
     return num - 1;
+}
+
+const MODEL_PAGE_SIZE: usize = 15;
+
+const ModelWizardInput = union(enum) {
+    use_default,
+    page_next,
+    page_prev,
+    page_index: usize,
+    typed_model: []const u8,
+};
+
+fn parseModelWizardInput(input: []const u8, visible_count: usize) ModelWizardInput {
+    if (input.len == 0) return .use_default;
+
+    if (std.ascii.eqlIgnoreCase(input, "n") or std.ascii.eqlIgnoreCase(input, "next")) {
+        return .page_next;
+    }
+    if (std.ascii.eqlIgnoreCase(input, "p") or std.ascii.eqlIgnoreCase(input, "prev")) {
+        return .page_prev;
+    }
+
+    if (std.fmt.parseInt(usize, input, 10)) |num| {
+        if (num >= 1 and num <= visible_count) {
+            return .{ .page_index = num - 1 };
+        }
+    } else |_| {}
+
+    return .{ .typed_model = input };
+}
+
+fn isFreeModelId(model_id: []const u8) bool {
+    return std.mem.endsWith(u8, model_id, ":free");
+}
+
+fn modelCatalogLessThan(_: void, lhs: []const u8, rhs: []const u8) bool {
+    const lhs_free = isFreeModelId(lhs);
+    const rhs_free = isFreeModelId(rhs);
+    if (lhs_free != rhs_free) return lhs_free and !rhs_free;
+    return std.ascii.lessThanIgnoreCase(lhs, rhs);
+}
+
+fn sortModelIds(models: [][]const u8) void {
+    std.mem.sortUnstable([]const u8, models, {}, modelCatalogLessThan);
+}
+
+fn selectDefaultFetchedModel(models: []const []const u8, default_model: []const u8) []const u8 {
+    for (models) |model| {
+        if (std.mem.eql(u8, model, default_model)) return model;
+    }
+    if (models.len > 0) return models[0];
+    return default_model;
 }
 
 pub const tunnel_options = [_][]const u8{ "none", "cloudflare", "ngrok", "tailscale" };
@@ -4185,7 +4224,7 @@ test "fallbackModelsForProvider uses provider defaults for uncataloged providers
     try std.testing.expectEqualStrings("glm-5", z_ai_models[0]);
 }
 
-test "parseModelIds extracts IDs from OpenRouter-style response" {
+test "parseModelIds extracts IDs from OpenRouter-style response and sorts them" {
     const json =
         \\{"data": [
         \\  {"id": "openai/gpt-4", "name": "GPT-4"},
@@ -4200,9 +4239,67 @@ test "parseModelIds extracts IDs from OpenRouter-style response" {
     }
 
     try std.testing.expect(models.len == 3);
-    try std.testing.expectEqualStrings("openai/gpt-4", models[0]);
-    try std.testing.expectEqualStrings("anthropic/claude-3", models[1]);
-    try std.testing.expectEqualStrings("meta/llama-3", models[2]);
+    try std.testing.expectEqualStrings("anthropic/claude-3", models[0]);
+    try std.testing.expectEqualStrings("meta/llama-3", models[1]);
+    try std.testing.expectEqualStrings("openai/gpt-4", models[2]);
+}
+
+test "parseModelWizardInput handles paging commands and selections" {
+    try std.testing.expect(parseModelWizardInput("", 5) == .use_default);
+    try std.testing.expect(parseModelWizardInput("n", 5) == .page_next);
+    try std.testing.expect(parseModelWizardInput("NEXT", 5) == .page_next);
+    try std.testing.expect(parseModelWizardInput("p", 5) == .page_prev);
+    try std.testing.expect(parseModelWizardInput("prev", 5) == .page_prev);
+
+    switch (parseModelWizardInput("3", 5)) {
+        .page_index => |idx| try std.testing.expectEqual(@as(usize, 2), idx),
+        else => return error.TestUnexpectedResult,
+    }
+
+    switch (parseModelWizardInput("17", 5)) {
+        .typed_model => |name| try std.testing.expectEqualStrings("17", name),
+        else => return error.TestUnexpectedResult,
+    }
+
+    switch (parseModelWizardInput("moonshotai/kimi-k2.5", 5)) {
+        .typed_model => |name| try std.testing.expectEqualStrings("moonshotai/kimi-k2.5", name),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "sortModelIds places free models first and keeps alphabetical order" {
+    var models = [_][]const u8{
+        "z-ai/glm-5-turbo",
+        "openai/gpt-5.4",
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "anthropic/claude-sonnet-4.6",
+        "a-provider/freebie:free",
+    };
+
+    sortModelIds(models[0..]);
+
+    try std.testing.expectEqualStrings("a-provider/freebie:free", models[0]);
+    try std.testing.expectEqualStrings("nvidia/nemotron-3-super-120b-a12b:free", models[1]);
+    try std.testing.expectEqualStrings("anthropic/claude-sonnet-4.6", models[2]);
+    try std.testing.expectEqualStrings("openai/gpt-5.4", models[3]);
+    try std.testing.expectEqualStrings("z-ai/glm-5-turbo", models[4]);
+}
+
+test "selectDefaultFetchedModel prefers provider default when present" {
+    const models = [_][]const u8{
+        "a-provider/freebie:free",
+        "anthropic/claude-sonnet-4.6",
+        "openai/gpt-5.4",
+    };
+
+    try std.testing.expectEqualStrings(
+        "anthropic/claude-sonnet-4.6",
+        selectDefaultFetchedModel(models[0..], "anthropic/claude-sonnet-4.6"),
+    );
+    try std.testing.expectEqualStrings(
+        "a-provider/freebie:free",
+        selectDefaultFetchedModel(models[0..], "missing/default"),
+    );
 }
 
 test "parseModelIds handles empty data array" {
@@ -4453,10 +4550,6 @@ test "CACHE_TTL_SECS is 12 hours" {
     try std.testing.expect(CACHE_TTL_SECS == 43200);
 }
 
-test "MAX_MODELS is 20" {
-    try std.testing.expect(MAX_MODELS == 20);
-}
-
 test "fetchModels returns models for anthropic (no network)" {
     const models = try fetchModels(std.testing.allocator, "anthropic", null);
     // Anthropic uses hardcoded fallback (allocated copies via fetchModelsFromApi)
@@ -4529,7 +4622,7 @@ test "modelsDevProviderKey maps known providers" {
     try std.testing.expect(modelsDevProviderKey("ollama") == null);
 }
 
-test "parseModelsDevModelIds filters non-chat models and prioritizes default" {
+test "parseModelsDevModelIds filters non-chat models and sorts them" {
     const json =
         \\{
         \\  "anthropic": {
@@ -4559,11 +4652,11 @@ test "parseModelsDevModelIds filters non-chat models and prioritizes default" {
     }
 
     try std.testing.expectEqual(@as(usize, 2), models.len);
-    try std.testing.expectEqualStrings("claude-opus-4-6", models[0]);
-    try std.testing.expectEqualStrings("claude-haiku-4-5", models[1]);
+    try std.testing.expectEqualStrings("claude-haiku-4-5", models[0]);
+    try std.testing.expectEqualStrings("claude-opus-4-6", models[1]);
 }
 
-test "parseModelIds respects data ordering" {
+test "parseModelIds sorts alphabetically when no free suffix is present" {
     const json =
         \\{"data": [
         \\  {"id": "z-model"},
@@ -4577,8 +4670,7 @@ test "parseModelIds respects data ordering" {
         std.testing.allocator.free(models);
     }
     try std.testing.expect(models.len == 3);
-    // Should preserve original order, not sort
-    try std.testing.expectEqualStrings("z-model", models[0]);
-    try std.testing.expectEqualStrings("a-model", models[1]);
-    try std.testing.expectEqualStrings("m-model", models[2]);
+    try std.testing.expectEqualStrings("a-model", models[0]);
+    try std.testing.expectEqualStrings("m-model", models[1]);
+    try std.testing.expectEqualStrings("z-model", models[2]);
 }
