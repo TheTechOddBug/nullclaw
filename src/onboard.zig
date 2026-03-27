@@ -2136,54 +2136,81 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
         }
     }
 
-    // Show up to 15 models as numbered choices if we successfully fetched them
+    // Show fetched models in pages so operators do not have to type a valid
+    // model name manually just because it was outside the first page.
     if (models_fetched) {
-        const display_max: usize = @min(models_to_use.len, 15);
-        for (models_to_use[0..display_max], 0..) |m, i| {
-            const is_default = std.mem.eql(u8, m, default_model_for_provider);
-            if (is_default) {
-                try out.print("    [{d}] {s} (default)\n", .{ i + 1, m });
-            } else {
-                try out.print("    [{d}] {s}\n", .{ i + 1, m });
+        const total_pages = @max(@as(usize, 1), std.math.divCeil(usize, models_to_use.len, MODEL_PAGE_SIZE) catch 1);
+        var page_idx: usize = 0;
+
+        while (true) {
+            const page_start = page_idx * MODEL_PAGE_SIZE;
+            const page_end = @min(page_start + MODEL_PAGE_SIZE, models_to_use.len);
+            const visible_models = models_to_use[page_start..page_end];
+
+            try out.print("  Models page {d}/{d}\n", .{ page_idx + 1, total_pages });
+            for (visible_models, 0..) |m, i| {
+                const is_default = std.mem.eql(u8, m, default_model_for_provider);
+                if (is_default) {
+                    try out.print("    [{d}] {s} (default)\n", .{ i + 1, m });
+                } else {
+                    try out.print("    [{d}] {s}\n", .{ i + 1, m });
+                }
             }
+            if (total_pages > 1) {
+                if (page_idx + 1 < total_pages and page_idx > 0) {
+                    try out.writeAll("    Type `n` for next page or `p` for previous page\n");
+                } else if (page_idx + 1 < total_pages) {
+                    try out.writeAll("    Type `n` for next page\n");
+                } else if (page_idx > 0) {
+                    try out.writeAll("    Type `p` for previous page\n");
+                }
+            }
+            try out.print("  Choice [1], `n`/`p`, or model name [{s}]: ", .{default_model_for_provider});
+
+            const model_input = prompt(out, &input_buf, "", "") orelse {
+                try out.writeAll("\n  Aborted.\n");
+                try out.flush();
+                return;
+            };
+
+            switch (parseModelWizardInput(model_input, visible_models.len)) {
+                .use_default => {
+                    const selected_default = selectDefaultFetchedModel(models_to_use, default_model_for_provider);
+                    cfg.default_model = try cfg.allocator.dupe(u8, selected_default);
+                    break;
+                },
+                .page_next => {
+                    if (page_idx + 1 < total_pages) {
+                        page_idx += 1;
+                        continue;
+                    }
+                },
+                .page_prev => {
+                    if (page_idx > 0) {
+                        page_idx -= 1;
+                        continue;
+                    }
+                },
+                .page_index => |visible_idx| {
+                    cfg.default_model = try cfg.allocator.dupe(u8, visible_models[visible_idx]);
+                    break;
+                },
+                .typed_model => |typed_model| {
+                    cfg.default_model = try cfg.allocator.dupe(u8, typed_model);
+                    break;
+                },
+            }
+
+            try out.writeAll("  Invalid page navigation for current page; try again.\n");
         }
-        if (models_to_use.len > display_max) {
-            try out.print("    ... and {d} more (type name to use any model)\n", .{models_to_use.len - display_max});
-        }
-        try out.print("  Choice [1] or model name [{s}]: ", .{default_model_for_provider});
     } else {
         try out.writeAll("  Enter model name directly:\n");
         try out.print("  Model name [{s}]: ", .{default_model_for_provider});
-    }
-    const model_input = prompt(out, &input_buf, "", "") orelse {
-        try out.writeAll("\n  Aborted.\n");
-        try out.flush();
-        return;
-    };
-    if (model_input.len == 0) {
-        // Default: use first model from the list (or provider default)
-        // Must dupe because models_to_use will be freed in defer block
-        cfg.default_model = if (models_to_use.len > 0)
-            try cfg.allocator.dupe(u8, models_to_use[0])
-        else
-            try cfg.allocator.dupe(u8, default_model_for_provider);
-    } else if (models_fetched) {
-        // If we successfully fetched models, try to parse as number (menu selection) or use as free-form model name
-        const display_max: usize = @min(models_to_use.len, 15);
-        if (std.fmt.parseInt(usize, model_input, 10)) |num| {
-            if (num >= 1 and num <= display_max) {
-                // Must dupe because models_to_use will be freed in defer block
-                cfg.default_model = try cfg.allocator.dupe(u8, models_to_use[num - 1]);
-            } else {
-                // Must dupe because default_model_for_provider is from const static data
-                cfg.default_model = try cfg.allocator.dupe(u8, default_model_for_provider);
-            }
-        } else |_| {
-            // Free-form model name typed by user
-            cfg.default_model = try cfg.allocator.dupe(u8, model_input);
-        }
-    } else {
-        // If we couldn't fetch models, use input as model name directly
+        const model_input = prompt(out, &input_buf, "", "") orelse {
+            try out.writeAll("\n  Aborted.\n");
+            try out.flush();
+            return;
+        };
         cfg.default_model = try cfg.allocator.dupe(u8, model_input);
     }
     try out.print("  -> {s}\n\n", .{cfg.default_model.?});
