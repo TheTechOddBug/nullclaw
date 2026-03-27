@@ -14,7 +14,7 @@ fn splitAtSlash(model_ref: []const u8, slash_idx: usize) ?ProviderModelRef {
     };
 }
 
-fn matchExplicitProviderPrefix(model_ref: []const u8, provider_name: []const u8) ?ProviderModelRef {
+pub fn matchExplicitProviderPrefix(model_ref: []const u8, provider_name: []const u8) ?ProviderModelRef {
     if (!std.mem.startsWith(u8, model_ref, provider_name)) return null;
     if (model_ref.len <= provider_name.len + 1) return null;
     if (model_ref[provider_name.len] != '/') return null;

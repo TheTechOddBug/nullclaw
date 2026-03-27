@@ -91,27 +91,65 @@ fn splitPrimaryModelRefWithProviders(primary: []const u8, provider_names: []cons
     return splitPrimaryModelRef(primary);
 }
 
-fn collectConfiguredProviderNames(
+fn appendUniqueProviderName(
+    names: *std.ArrayListUnmanaged([]const u8),
+    allocator: std.mem.Allocator,
+    provider_name: []const u8,
+) !void {
+    if (provider_name.len == 0) return;
+
+    for (names.items) |existing| {
+        if (std.mem.eql(u8, existing, provider_name)) return;
+    }
+
+    try names.append(allocator, provider_name);
+}
+
+fn collectExplicitProviderNames(
     allocator: std.mem.Allocator,
     root: std.json.ObjectMap,
 ) ![]const []const u8 {
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer names.deinit(allocator);
+
     if (root.get("models")) |models| {
         if (models == .object) {
             if (models.object.get("providers")) |providers_value| {
                 if (providers_value == .object) {
-                    var names: std.ArrayListUnmanaged([]const u8) = .empty;
-                    errdefer names.deinit(allocator);
-
                     var it = providers_value.object.iterator();
                     while (it.next()) |entry| {
-                        try names.append(allocator, entry.key_ptr.*);
+                        try appendUniqueProviderName(&names, allocator, entry.key_ptr.*);
                     }
-                    return if (names.items.len == 0) &.{} else try names.toOwnedSlice(allocator);
                 }
             }
         }
     }
-    return &.{};
+
+    if (root.get("model_routes")) |routes_value| {
+        if (routes_value == .array) {
+            for (routes_value.array.items) |item| {
+                if (item != .object) continue;
+                const provider_value = item.object.get("provider") orelse continue;
+                if (provider_value != .string) continue;
+                try appendUniqueProviderName(&names, allocator, provider_value.string);
+            }
+        }
+    }
+
+    if (root.get("reliability")) |reliability_value| {
+        if (reliability_value == .object) {
+            if (reliability_value.object.get("fallback_providers")) |fallbacks_value| {
+                if (fallbacks_value == .array) {
+                    for (fallbacks_value.array.items) |item| {
+                        if (item != .string) continue;
+                        try appendUniqueProviderName(&names, allocator, item.string);
+                    }
+                }
+            }
+        }
+    }
+
+    return if (names.items.len == 0) &.{} else try names.toOwnedSlice(allocator);
 }
 
 fn parseDiagnosticsOtelHeaders(
@@ -151,7 +189,7 @@ fn parseDiagnosticsOtelHeaders(
 fn parseNamedAgentObject(
     allocator: std.mem.Allocator,
     config_path: []const u8,
-    configured_provider_names: []const []const u8,
+    explicit_provider_names: []const []const u8,
     agent_name: []const u8,
     item: std.json.Value,
 ) !?types.NamedAgentConfig {
@@ -182,7 +220,7 @@ fn parseNamedAgentObject(
         }
 
         if (m == .string) {
-            if (splitPrimaryModelRefWithProviders(m.string, configured_provider_names)) |parsed_ref| {
+            if (splitPrimaryModelRefWithProviders(m.string, explicit_provider_names)) |parsed_ref| {
                 break :blk parsed_ref;
             }
             break :blk null;
@@ -190,7 +228,7 @@ fn parseNamedAgentObject(
         if (m == .object) {
             if (m.object.get("primary")) |mp| {
                 if (mp == .string) {
-                    if (splitPrimaryModelRefWithProviders(mp.string, configured_provider_names)) |parsed_ref| {
+                    if (splitPrimaryModelRefWithProviders(mp.string, explicit_provider_names)) |parsed_ref| {
                         break :blk parsed_ref;
                     }
                 }
@@ -674,8 +712,8 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
     defer parsed.deinit();
 
     const root = parsed.value.object;
-    const configured_provider_names = try collectConfiguredProviderNames(self.allocator, root);
-    defer if (configured_provider_names.len > 0) self.allocator.free(configured_provider_names);
+    const explicit_provider_names = try collectExplicitProviderNames(self.allocator, root);
+    defer if (explicit_provider_names.len > 0) self.allocator.free(explicit_provider_names);
 
     // Top-level fields
     if (root.get("workspace")) |v| {
@@ -783,7 +821,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                                 if (v == .string) {
                                     // Always try to parse primary field - it may contain full provider/model info
                                     // or just the model part (when legacy default_provider exists)
-                                    if (splitPrimaryModelRefWithProviders(v.string, configured_provider_names)) |parsed_ref| {
+                                    if (splitPrimaryModelRefWithProviders(v.string, explicit_provider_names)) |parsed_ref| {
                                         self.default_model = try self.allocator.dupe(u8, parsed_ref.model);
                                         // Only update provider if not already set from legacy field
                                         if (!self.legacy_default_provider_detected) {
@@ -849,7 +887,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                             var agent_cfg = try parseNamedAgentObject(
                                 self.allocator,
                                 self.config_path,
-                                configured_provider_names,
+                                explicit_provider_names,
                                 name_val.string,
                                 item,
                             ) orelse continue;
@@ -876,7 +914,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                     var agent_cfg = try parseNamedAgentObject(
                         self.allocator,
                         self.config_path,
-                        configured_provider_names,
+                        explicit_provider_names,
                         key,
                         entry.value_ptr.*,
                     ) orelse continue;
@@ -2475,4 +2513,74 @@ test "parseJson keeps configured versionless custom url namespaces in defaults" 
     try std.testing.expectEqualStrings("custom:https://gateway.example.com", cfg.default_provider);
     try std.testing.expect(cfg.default_model != null);
     try std.testing.expectEqualStrings("qianfan/custom-model", cfg.default_model.?);
+}
+
+test "parseJson keeps route-only custom url provider refs in defaults" {
+    // Regression: explicit providers defined only in model_routes must survive restart parsing.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var cfg = Config{
+        .workspace_dir = "/tmp",
+        .config_path = "/tmp/config.json",
+        .allocator = allocator,
+    };
+
+    const json =
+        \\{
+        \\  "model_routes": [
+        \\    {
+        \\      "hint": "fast",
+        \\      "provider": "custom:https://route.example.com/qianfan",
+        \\      "model": "custom-model"
+        \\    }
+        \\  ],
+        \\  "agents": {
+        \\    "defaults": {
+        \\      "model": {
+        \\        "primary": "custom:https://route.example.com/qianfan/custom-model"
+        \\      }
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    try cfg.parseJson(json);
+    try std.testing.expectEqualStrings("custom:https://route.example.com/qianfan", cfg.default_provider);
+    try std.testing.expect(cfg.default_model != null);
+    try std.testing.expectEqualStrings("custom-model", cfg.default_model.?);
+}
+
+test "parseJson keeps fallback-only custom url provider refs in defaults" {
+    // Regression: explicit providers defined only in reliability.fallback_providers must survive restart parsing.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var cfg = Config{
+        .workspace_dir = "/tmp",
+        .config_path = "/tmp/config.json",
+        .allocator = allocator,
+    };
+
+    const json =
+        \\{
+        \\  "reliability": {
+        \\    "fallback_providers": [
+        \\      "custom:https://fb.example.com/qianfan"
+        \\    ]
+        \\  },
+        \\  "agents": {
+        \\    "defaults": {
+        \\      "model": {
+        \\        "primary": "custom:https://fb.example.com/qianfan/custom-model"
+        \\      }
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    try cfg.parseJson(json);
+    try std.testing.expectEqualStrings("custom:https://fb.example.com/qianfan", cfg.default_provider);
+    try std.testing.expect(cfg.default_model != null);
+    try std.testing.expectEqualStrings("custom-model", cfg.default_model.?);
 }
