@@ -23,3 +23,22 @@ pub fn setVerbose(enabled: bool) void {
 pub fn isVerbose() bool {
     return verbose_enabled.load(.acquire);
 }
+
+test "verbose flag defaults to false" {
+    // Reset to known state
+    setVerbose(false);
+    try std.testing.expect(!isVerbose());
+}
+
+test "setVerbose enables verbose mode" {
+    setVerbose(true);
+    try std.testing.expect(isVerbose());
+    // Reset for other tests
+    setVerbose(false);
+}
+
+test "setVerbose disables verbose mode" {
+    setVerbose(true);
+    setVerbose(false);
+    try std.testing.expect(!isVerbose());
+}
