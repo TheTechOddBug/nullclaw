@@ -8,7 +8,7 @@
             .path = "vendor/sqlite3",
         },
         .websocket = .{
-            .url = "git+https://github.com/nullclaw/websocket#3743a0242bcfe47d89245084e7eac808736c8313",
+            .url = "git+https://github.com/nullclaw/websocket#6a62e67405d883206a526cb25d667cf2e6fc4b2c",
             .hash = "websocket-0.1.0-ZPISdRt7AwCgmiEnDNUp_kwBgzTEyVeLAPhTHZ7UZhMI",
         },
         .wasm3 = .{
