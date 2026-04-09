@@ -67,6 +67,24 @@ pub fn bootstrapRootFilename(path: []const u8) ?[]const u8 {
     return basename;
 }
 
+pub fn isSymlinkPath(path: []const u8) !bool {
+    const dir_path = std.fs.path.dirname(path) orelse ".";
+    const entry_name = std.fs.path.basename(path);
+    var dir = if (std.fs.path.isAbsolute(dir_path))
+        try std.fs.openDirAbsolute(dir_path, .{})
+    else
+        try std.fs.cwd().openDir(dir_path, .{});
+    defer dir.close();
+
+    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    _ = dir.readLink(entry_name, &link_buf) catch |err| switch (err) {
+        error.NotLink => return false,
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    return true;
+}
+
 test "bootstrapRootFilename returns basename for workspace root bootstrap file" {
     try std.testing.expectEqualStrings("BOOTSTRAP.md", bootstrapRootFilename("BOOTSTRAP.md").?);
 }
@@ -126,4 +144,26 @@ test "resolveNearestExistingAncestor returns nearest existing parent" {
     defer std.testing.allocator.free(resolved);
 
     try std.testing.expectEqualStrings(existing_path, resolved);
+}
+
+test "isSymlinkPath detects symlink and regular file" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{ .sub_path = "target.txt", .data = "hello" });
+    try tmp.dir.writeFile(.{ .sub_path = "regular.txt", .data = "world" });
+    try tmp.dir.symLink("target.txt", "link.txt", .{});
+
+    const workspace_dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(workspace_dir);
+
+    const link_path = try std.fs.path.join(std.testing.allocator, &.{ workspace_dir, "link.txt" });
+    defer std.testing.allocator.free(link_path);
+    try std.testing.expect(try isSymlinkPath(link_path));
+
+    const regular_path = try std.fs.path.join(std.testing.allocator, &.{ workspace_dir, "regular.txt" });
+    defer std.testing.allocator.free(regular_path);
+    try std.testing.expect(!(try isSymlinkPath(regular_path)));
 }

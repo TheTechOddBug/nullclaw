@@ -10,6 +10,7 @@ const file_common = @import("file_common.zig");
 const bootstrap_mod = @import("../bootstrap/root.zig");
 const memory_root = @import("../memory/root.zig");
 const bootstrapRootFilename = file_common.bootstrapRootFilename;
+const isSymlinkPath = file_common.isSymlinkPath;
 const prepareWorkspacePath = file_common.prepareWorkspacePath;
 const resolveNearestExistingAncestor = file_common.resolveNearestExistingAncestor;
 
@@ -234,24 +235,6 @@ pub const FileWriteTool = struct {
         return ToolResult{ .success = true, .output = msg, .error_msg = null };
     }
 };
-
-fn isSymlinkPath(path: []const u8) !bool {
-    const dir_path = std.fs.path.dirname(path) orelse ".";
-    const entry_name = std.fs.path.basename(path);
-    var dir = if (std.fs.path.isAbsolute(dir_path))
-        try std.fs.openDirAbsolute(dir_path, .{})
-    else
-        try std.fs.cwd().openDir(dir_path, .{});
-    defer dir.close();
-
-    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
-    _ = dir.readLink(entry_name, &link_buf) catch |err| switch (err) {
-        error.NotLink => return false,
-        error.FileNotFound => return false,
-        else => return err,
-    };
-    return true;
-}
 
 // ── Tests ───────────────────────────────────────────────────────────
 
