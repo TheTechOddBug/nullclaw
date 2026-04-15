@@ -9,6 +9,7 @@ const log = std.log.scoped(.agent);
 const providers = @import("../providers/root.zig");
 const config_types = @import("../config_types.zig");
 const path_prefix = @import("../path_prefix.zig");
+const util = @import("../util.zig");
 const Provider = providers.Provider;
 const ChatMessage = providers.ChatMessage;
 const bootstrap_mod = @import("../bootstrap/root.zig");
@@ -123,7 +124,7 @@ pub fn autoCompactHistory(
 
         // Truncate if too long
         if (merged.len > config.max_summary_chars) {
-            const truncated = try allocator.dupe(u8, merged[0..config.max_summary_chars]);
+            const truncated = try allocator.dupe(u8, util.truncateUtf8(merged, config.max_summary_chars));
             allocator.free(merged);
             break :blk truncated;
         }
@@ -262,7 +263,7 @@ fn buildCompactionTranscript(
     }
 
     if (buf.items.len > max_source_chars) {
-        buf.items.len = max_source_chars;
+        buf.items.len = util.truncateUtf8(buf.items, max_source_chars).len;
     }
 
     return buf.toOwnedSlice(allocator);
@@ -306,7 +307,7 @@ fn summarizeSlice(
     ) catch {
         // Fallback: use a local truncation of the transcript
         const max_len = @min(transcript.len, config.max_summary_chars);
-        return try allocator.dupe(u8, transcript[0..max_len]);
+        return try allocator.dupe(u8, util.truncateUtf8(transcript, max_len));
     };
     // Free response's heap-allocated fields after extracting what we need
     defer {
@@ -328,7 +329,7 @@ fn summarizeSlice(
 
     const raw_summary = summary_resp.contentOrEmpty();
     const max_len = @min(raw_summary.len, config.max_summary_chars);
-    return try allocator.dupe(u8, raw_summary[0..max_len]);
+    return try allocator.dupe(u8, util.truncateUtf8(raw_summary, max_len));
 }
 
 const HeadingInfo = struct {
@@ -494,7 +495,7 @@ fn readWorkspaceContextForSummary(
             if (sections.len == 0) return try allocator.dupe(u8, "");
 
             const safe_content = if (sections.len > MAX_WORKSPACE_CONTEXT_CHARS)
-                try std.fmt.allocPrint(allocator, "{s}\n...[truncated]...", .{sections[0..MAX_WORKSPACE_CONTEXT_CHARS]})
+                try std.fmt.allocPrint(allocator, "{s}\n...[truncated]...", .{util.truncateUtf8(sections, MAX_WORKSPACE_CONTEXT_CHARS)})
             else
                 try allocator.dupe(u8, sections);
             defer allocator.free(safe_content);
@@ -521,7 +522,7 @@ fn readWorkspaceContextForSummary(
     if (sections.len == 0) return try allocator.dupe(u8, "");
 
     const safe_content = if (sections.len > MAX_WORKSPACE_CONTEXT_CHARS)
-        try std.fmt.allocPrint(allocator, "{s}\n...[truncated]...", .{sections[0..MAX_WORKSPACE_CONTEXT_CHARS]})
+        try std.fmt.allocPrint(allocator, "{s}\n...[truncated]...", .{util.truncateUtf8(sections, MAX_WORKSPACE_CONTEXT_CHARS)})
     else
         try allocator.dupe(u8, sections);
     defer allocator.free(safe_content);

@@ -4,6 +4,7 @@ const Tool = root.Tool;
 const ToolResult = root.ToolResult;
 const JsonObjectMap = root.JsonObjectMap;
 const mem_root = @import("../memory/root.zig");
+const util = @import("../util.zig");
 const Memory = mem_root.Memory;
 const MemoryCategory = mem_root.MemoryCategory;
 const MemoryEntry = mem_root.MemoryEntry;
@@ -80,7 +81,7 @@ pub const MemoryListTool = struct {
             if (written >= shown) break;
             try w.print("  {d}. {s} [{s}] {s}\n", .{ written + 1, entry.key, entry.category.toString(), entry.timestamp });
             if (include_content) {
-                const preview = truncateUtf8(entry.content, 120);
+                const preview = util.truncateUtf8(entry.content, 120);
                 try w.print("     {s}{s}\n", .{ preview, if (entry.content.len > preview.len) "..." else "" });
             }
             written += 1;
@@ -91,13 +92,6 @@ pub const MemoryListTool = struct {
 
     fn isInternalEntry(entry: MemoryEntry) bool {
         return mem_root.isInternalMemoryEntryKeyOrContent(entry.key, entry.content);
-    }
-
-    fn truncateUtf8(s: []const u8, max_len: usize) []const u8 {
-        if (s.len <= max_len) return s;
-        var end: usize = max_len;
-        while (end > 0 and s[end] & 0xC0 == 0x80) end -= 1;
-        return s[0..end];
     }
 };
 
