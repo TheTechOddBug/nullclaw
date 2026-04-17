@@ -144,7 +144,7 @@ fn findProfileForSessionKey(config: *const Config, session_key: []const u8) ?con
 }
 
 const SessionProviderContext = struct {
-    provider: Provider,
+    provider: ?Provider = null,
     holder: ?providers.ProviderHolder = null,
     owned_api_key: ?[]u8 = null,
 
@@ -1344,7 +1344,7 @@ pub const SessionManager = struct {
         const session_provider = if (session.provider_holder) |*holder|
             holder.provider()
         else
-            provider_ctx.provider;
+            provider_ctx.provider.?;
 
         var agent = try Agent.fromConfigWithProfile(
             self.allocator,
@@ -1431,7 +1431,7 @@ pub const SessionManager = struct {
             break :blk owned_api_key;
         };
 
-        var holder = providers.ProviderHolder.fromConfigWithApiMode(
+        const holder = providers.ProviderHolder.fromConfigWithApiMode(
             self.allocator,
             profile.provider,
             provider_api_key,
@@ -1444,7 +1444,6 @@ pub const SessionManager = struct {
             self.config.getProviderExtraBodyParams(profile.provider),
         );
         return .{
-            .provider = holder.provider(),
             .holder = holder,
             .owned_api_key = owned_api_key,
         };
@@ -2744,17 +2743,26 @@ test "getOrCreate stores named agent provider interface from session-owned holde
     var mock = MockProvider{ .response = "ok" };
     var cfg = testConfig();
     cfg.default_provider = "openrouter";
+    cfg.providers = &.{
+        .{
+            .name = "custom:dmr",
+            .base_url = "http://127.0.0.1:8080/v1",
+        },
+    };
     cfg.agents = &.{
         .{
             .name = "Coder Agent",
-            .provider = "ollama",
-            .model = "qwen2.5-coder:14b",
+            .provider = "custom:dmr",
+            .model = "smollm2",
+            .api_key = "placeholder",
         },
     };
 
     var sm = testSessionManager(testing.allocator, &mock, &cfg);
     defer sm.deinit();
 
+    // Regression: issue #811 requires holder-backed custom providers to bind
+    // Agent.provider to the session-owned holder rather than transient storage.
     const session = try sm.getOrCreate("agent:coder-agent:telegram:group:-100123");
     try testing.expect(session.provider_holder != null);
 
@@ -2762,6 +2770,12 @@ test "getOrCreate stores named agent provider interface from session-owned holde
     const holder_provider = holder.provider();
     try testing.expect(session.agent.provider.ptr == holder_provider.ptr);
     try testing.expect(session.agent.provider.vtable == holder_provider.vtable);
+    switch (session.provider_holder.?) {
+        .compatible => |*compatible_provider| {
+            try testing.expectEqual(@intFromPtr(compatible_provider), @intFromPtr(session.agent.provider.ptr));
+        },
+        else => unreachable,
+    }
 }
 
 test "getOrCreate uses named agent workspace namespace when workspace_path is set" {

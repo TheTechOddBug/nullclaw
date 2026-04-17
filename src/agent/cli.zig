@@ -42,15 +42,11 @@ const CliStreamCtx = struct {
 };
 
 const CliProviderContext = struct {
-    provider: Provider,
-    holder: ?providers.ProviderHolder = null,
+    holder: providers.ProviderHolder,
     owned_api_key: ?[]u8 = null,
 
     fn deinit(self: *CliProviderContext, allocator: std.mem.Allocator) void {
-        if (self.holder) |*holder| {
-            holder.deinit();
-            self.holder = null;
-        }
+        self.holder.deinit();
         if (self.owned_api_key) |api_key| {
             allocator.free(api_key);
             self.owned_api_key = null;
@@ -251,7 +247,7 @@ fn resolveProfileProvider(
         break :blk owned_api_key;
     };
 
-    var holder = providers.ProviderHolder.fromConfigWithApiMode(
+    const holder = providers.ProviderHolder.fromConfigWithApiMode(
         allocator,
         profile.provider,
         provider_api_key,
@@ -264,10 +260,17 @@ fn resolveProfileProvider(
         cfg.getProviderExtraBodyParams(profile.provider),
     );
     return .{
-        .provider = holder.provider(),
         .holder = holder,
         .owned_api_key = owned_api_key,
     };
+}
+
+/// Resolve the provider only after any holder-backed override reaches stable storage.
+fn activeCliProvider(
+    provider_ctx: ?*CliProviderContext,
+    runtime_provider: ?*providers.runtime_bundle.RuntimeProviderBundle,
+) Provider {
+    return if (provider_ctx) |ctx| ctx.holder.provider() else runtime_provider.?.provider();
 }
 
 /// Run the agent in single-message or interactive REPL mode.
@@ -477,7 +480,10 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         tools_mod.bindMemoryRuntime(tools, rt);
     }
 
-    const provider_i: Provider = if (provider_ctx) |ctx| ctx.provider else runtime_provider.?.provider();
+    const provider_i = activeCliProvider(
+        if (provider_ctx) |*ctx| ctx else null,
+        if (runtime_provider) |*bundle| bundle else null,
+    );
 
     const supports_streaming = provider_i.supportsStreaming();
 
@@ -935,6 +941,42 @@ test "parseAgentArgs parses provider and model overrides" {
     try std.testing.expectEqualStrings("ollama", parsed.provider_override.?);
     try std.testing.expectEqualStrings("llama3.2:latest", parsed.model_override.?);
     try std.testing.expectApproxEqAbs(@as(f64, 0.25), parsed.temperature_override.?, 0.000001);
+}
+
+test "activeCliProvider uses returned holder storage for named agents" {
+    var cfg = Config{
+        .allocator = std.testing.allocator,
+        .workspace_dir = "/tmp/nullclaw-cli-test",
+        .config_path = "/tmp/nullclaw-cli-test/config.json",
+        .providers = &.{
+            .{
+                .name = "custom:dmr",
+                .base_url = "http://127.0.0.1:8080/v1",
+            },
+        },
+    };
+    const profile = config_types.NamedAgentConfig{
+        .name = "sub",
+        .provider = "custom:dmr",
+        .model = "smollm2",
+        .api_key = "placeholder",
+    };
+
+    // Regression: issue #811 requires the runtime Provider to be derived from
+    // the returned holder storage, not from resolveProfileProvider's stack frame.
+    var provider_ctx = try resolveProfileProvider(std.testing.allocator, &cfg, profile);
+    defer provider_ctx.deinit(std.testing.allocator);
+
+    const provider = activeCliProvider(&provider_ctx, null);
+    const holder_provider = provider_ctx.holder.provider();
+    try std.testing.expectEqual(@intFromPtr(holder_provider.ptr), @intFromPtr(provider.ptr));
+    try std.testing.expectEqual(@intFromPtr(holder_provider.vtable), @intFromPtr(provider.vtable));
+    switch (provider_ctx.holder) {
+        .compatible => |*compatible_provider| {
+            try std.testing.expectEqual(@intFromPtr(compatible_provider), @intFromPtr(provider.ptr));
+        },
+        else => unreachable,
+    }
 }
 
 test "shouldPrintTurnResponse prints fallback when streaming emits no text" {
