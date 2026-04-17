@@ -118,9 +118,9 @@ nullclaw --help
 
 ### 2) Build from source
 
-> **Prerequisite:** use **Zig 0.15.2** (exact version).
-> `0.16.0-dev` and other Zig versions are currently unsupported and may fail to build.
-> Verify before building: `zig version` should print `0.15.2`.
+> **Prerequisite:** use **Zig 0.16.0** (exact version).
+> Other Zig versions are currently unsupported and may fail to build.
+> Verify before building: `zig version` should print `0.16.0`.
 
 ```bash
 git clone https://github.com/nullclaw/nullclaw.git
@@ -782,7 +782,7 @@ See [Gateway API docs](docs/en/gateway-api.md) for full A2A reference including 
 
 ## Development
 
-Build and tests are pinned to **Zig 0.15.2**.
+Build and tests are pinned to **Zig 0.16.0**.
 
 ```bash
 zig build                          # Dev build
@@ -803,7 +803,7 @@ Channel CJM coverage (ingress parsing/filtering, session key routing, account pr
 ### Project Stats
 
 ```
-Language:     Zig 0.15.2
+Language:     Zig 0.16.0
 Source files: ~250
 Lines of code: ~249,000
 Tests:        5,300+
