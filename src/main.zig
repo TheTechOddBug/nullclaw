@@ -453,24 +453,38 @@ fn trimTrailingNewline(text: []const u8) []const u8 {
     return trimmed;
 }
 
+fn appendAgentSessionListJson(out: anytype, sessions: []const yc.memory.SessionInfo, total: u64) !void {
+    try out.writeAll("{\"sessions\":[");
+    for (sessions, 0..) |session, idx| {
+        if (idx > 0) try out.writeAll(",");
+        try out.writeAll("{\"session_key\":");
+        try writeJsonString(out, session.session_id);
+        try out.writeAll(",\"created_at\":");
+        try writeJsonString(out, session.first_message_at);
+        try out.writeAll(",\"last_active\":");
+        try writeJsonString(out, session.last_message_at);
+        try out.print(",\"turn_count\":{d},\"turn_running\":false}}", .{session.message_count / 2});
+    }
+    try out.print("],\"total\":{d}}}", .{total});
+}
+
 fn writeAgentSessionListJson(sessions: []const yc.memory.SessionInfo, total: u64) !void {
     var buf: [65536]u8 = undefined;
     var bw = std_compat.fs.File.stdout().writer(&buf);
     const out = &bw.interface;
-
-    out.print("{{\"sessions\":[", .{}) catch return;
-    for (sessions, 0..) |session, idx| {
-        if (idx > 0) out.writeAll(",") catch return;
-        out.writeAll("{\"session_key\":") catch return;
-        writeJsonString(out, session.session_id) catch return;
-        out.writeAll(",\"created_at\":") catch return;
-        writeJsonString(out, session.first_message_at) catch return;
-        out.writeAll(",\"last_active\":") catch return;
-        writeJsonString(out, session.last_message_at) catch return;
-        out.print(",\"turn_count\":{d},\"turn_running\":false}}", .{session.message_count / 2}) catch return;
-    }
-    out.print("],\"total\":{d}}}\n", .{total}) catch return;
+    appendAgentSessionListJson(out, sessions, total) catch return;
+    out.writeAll("\n") catch return;
     out.flush() catch return;
+}
+
+fn appendAgentSessionDetailJson(out: anytype, session: yc.memory.SessionInfo) !void {
+    try out.writeAll("{\"session_key\":");
+    try writeJsonString(out, session.session_id);
+    try out.writeAll(",\"created_at\":");
+    try writeJsonString(out, session.first_message_at);
+    try out.writeAll(",\"last_active\":");
+    try writeJsonString(out, session.last_message_at);
+    try out.print(",\"turn_count\":{d},\"turn_running\":false}}", .{session.message_count / 2});
 }
 
 fn writeAgentSessionDetailJson(session: yc.memory.SessionInfo) void {
@@ -478,14 +492,17 @@ fn writeAgentSessionDetailJson(session: yc.memory.SessionInfo) void {
     var bw = std_compat.fs.File.stdout().writer(&buf);
     const out = &bw.interface;
 
-    out.writeAll("{\"session_key\":") catch return;
-    writeJsonString(out, session.session_id) catch return;
-    out.writeAll(",\"created_at\":") catch return;
-    writeJsonString(out, session.first_message_at) catch return;
-    out.writeAll(",\"last_active\":") catch return;
-    writeJsonString(out, session.last_message_at) catch return;
-    out.print(",\"turn_count\":{d},\"turn_running\":false}}\n", .{session.message_count / 2}) catch return;
+    appendAgentSessionDetailJson(out, session) catch return;
+    out.writeAll("\n") catch return;
     out.flush() catch return;
+}
+
+fn appendAgentInvokeResponseJson(out: anytype, session_key: []const u8, response: []const u8, turn_count: u64) !void {
+    try out.writeAll("{\"session\":");
+    try writeJsonString(out, session_key);
+    try out.writeAll(",\"response\":");
+    try writeJsonString(out, response);
+    try out.print(",\"turn_count\":{d}}}", .{turn_count});
 }
 
 fn runAgentAdmin(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
@@ -643,11 +660,8 @@ fn runAgentInvokeJson(allocator: std.mem.Allocator, sub_args: []const []const u8
         var buf: [65536]u8 = undefined;
         var bw = std_compat.fs.File.stdout().writer(&buf);
         const out = &bw.interface;
-        out.writeAll("{\"session\":") catch return;
-        writeJsonString(out, effective_session) catch return;
-        out.writeAll(",\"response\":") catch return;
-        writeJsonString(out, response_text) catch return;
-        out.print(",\"turn_count\":{d}}}\n", .{turn_count}) catch return;
+        appendAgentInvokeResponseJson(out, effective_session, response_text, turn_count) catch return;
+        out.writeAll("\n") catch return;
         out.flush() catch return;
         return;
     }
@@ -757,9 +771,8 @@ fn runAgentSessionsAdmin(allocator: std.mem.Allocator, sub_args: []const []const
         var buf: [4096]u8 = undefined;
         var bw = std_compat.fs.File.stdout().writer(&buf);
         const out = &bw.interface;
-        out.writeAll("{\"session_key\":") catch return;
-        writeJsonString(out, session_key) catch return;
-        out.writeAll(",\"terminated\":true}\n") catch return;
+        appendAgentSessionTerminationJson(out, session_key) catch return;
+        out.writeAll("\n") catch return;
         out.flush() catch return;
         return;
     }
@@ -1815,6 +1828,30 @@ fn writeJsonError(code: []const u8, message: []const u8, backend: ?[]const u8) v
     out.flush() catch return;
 }
 
+fn appendConfigMutationJson(
+    out: anytype,
+    action: yc.config_mutator.MutationAction,
+    result: *const yc.config_mutator.MutationResult,
+) !void {
+    try out.writeAll("{\"action\":");
+    try writeJsonString(out, @tagName(action));
+    try out.writeAll(",\"path\":");
+    try writeJsonString(out, result.path);
+    try out.writeAll(",\"changed\":");
+    try writeJsonBool(out, result.changed);
+    try out.writeAll(",\"applied\":");
+    try writeJsonBool(out, result.applied);
+    try out.writeAll(",\"requires_restart\":");
+    try writeJsonBool(out, result.requires_restart);
+    try out.writeAll(",\"old_value\":");
+    try out.writeAll(result.old_value_json);
+    try out.writeAll(",\"new_value\":");
+    try out.writeAll(result.new_value_json);
+    try out.writeAll(",\"backup_path\":");
+    try writeJsonNullableString(out, result.backup_path);
+    try out.writeAll("}");
+}
+
 fn writeConfigMutationJson(
     action: yc.config_mutator.MutationAction,
     result: *const yc.config_mutator.MutationResult,
@@ -1822,24 +1859,8 @@ fn writeConfigMutationJson(
     var buf: [8192]u8 = undefined;
     var bw = std_compat.fs.File.stdout().writer(&buf);
     const out = &bw.interface;
-
-    out.writeAll("{\"action\":") catch return;
-    writeJsonString(out, @tagName(action)) catch return;
-    out.writeAll(",\"path\":") catch return;
-    writeJsonString(out, result.path) catch return;
-    out.writeAll(",\"changed\":") catch return;
-    writeJsonBool(out, result.changed) catch return;
-    out.writeAll(",\"applied\":") catch return;
-    writeJsonBool(out, result.applied) catch return;
-    out.writeAll(",\"requires_restart\":") catch return;
-    writeJsonBool(out, result.requires_restart) catch return;
-    out.writeAll(",\"old_value\":") catch return;
-    out.writeAll(result.old_value_json) catch return;
-    out.writeAll(",\"new_value\":") catch return;
-    out.writeAll(result.new_value_json) catch return;
-    out.writeAll(",\"backup_path\":") catch return;
-    writeJsonNullableString(out, result.backup_path) catch return;
-    out.writeAll("}\n") catch return;
+    appendConfigMutationJson(out, action, result) catch return;
+    out.writeAll("\n") catch return;
     out.flush() catch return;
 }
 
@@ -1849,34 +1870,74 @@ fn modelCanonicalProvider(raw_model: []const u8) ?[]const u8 {
     return yc.onboard.canonicalProviderName(raw_model[0..slash]);
 }
 
+fn appendModelInfoJson(out: anytype, model_name: []const u8) !void {
+    const provider = modelCanonicalProvider(model_name);
+
+    try out.writeAll("{\"name\":");
+    try writeJsonString(out, model_name);
+    try out.writeAll(",\"provider\":");
+    try writeJsonNullableString(out, provider);
+    try out.writeAll(",\"canonical_name\":");
+    if (provider) |canonical_provider| {
+        const slash = std.mem.indexOfScalar(u8, model_name, '/').?;
+        if (slash + 1 < model_name.len) {
+            try out.writeByte('"');
+            writeJsonEscaped(out, canonical_provider);
+            try out.writeByte('/');
+            writeJsonEscaped(out, model_name[slash + 1 ..]);
+            try out.writeByte('"');
+        } else {
+            try writeJsonString(out, canonical_provider);
+        }
+    } else {
+        try writeJsonString(out, model_name);
+    }
+    try out.writeAll(",\"context_window\":null}");
+}
+
 fn writeModelInfoJson(model_name: []const u8) void {
     var buf: [4096]u8 = undefined;
     var bw = std_compat.fs.File.stdout().writer(&buf);
     const out = &bw.interface;
-
-    const provider = modelCanonicalProvider(model_name);
-
-    out.writeAll("{\"name\":") catch return;
-    writeJsonString(out, model_name) catch return;
-    out.writeAll(",\"provider\":") catch return;
-    writeJsonNullableString(out, provider) catch return;
-    out.writeAll(",\"canonical_name\":") catch return;
-    if (provider) |canonical_provider| {
-        const slash = std.mem.indexOfScalar(u8, model_name, '/').?;
-        if (slash + 1 < model_name.len) {
-            out.writeByte('"') catch return;
-            writeJsonEscaped(out, canonical_provider);
-            out.writeByte('/') catch return;
-            writeJsonEscaped(out, model_name[slash + 1 ..]);
-            out.writeByte('"') catch return;
-        } else {
-            writeJsonString(out, canonical_provider) catch return;
-        }
-    } else {
-        writeJsonString(out, model_name) catch return;
-    }
-    out.writeAll(",\"context_window\":null}\n") catch return;
+    appendModelInfoJson(out, model_name) catch return;
+    out.writeAll("\n") catch return;
     out.flush() catch return;
+}
+
+fn appendCronJobJson(out: anytype, job: *const yc.cron.CronJob) !void {
+    try out.writeAll("{\"id\":");
+    try writeJsonString(out, job.id);
+    try out.writeAll(",\"expression\":");
+    try writeJsonString(out, job.expression);
+    try out.writeAll(",\"command\":");
+    try writeJsonString(out, job.command);
+    try out.print(",\"next_run_secs\":{d}", .{job.next_run_secs});
+    try out.writeAll(",\"last_run_secs\":");
+    try writeJsonNullableI64(out, job.last_run_secs);
+    try out.writeAll(",\"last_status\":");
+    try writeJsonNullableString(out, job.last_status);
+    try out.writeAll(",\"paused\":");
+    try writeJsonBool(out, job.paused);
+    try out.writeAll(",\"one_shot\":");
+    try writeJsonBool(out, job.one_shot);
+    try out.writeAll(",\"job_type\":");
+    try writeJsonString(out, job.job_type.asStr());
+    try out.writeAll(",\"session_target\":");
+    try writeJsonString(out, job.session_target.asStr());
+    try out.writeAll(",\"prompt\":");
+    try writeJsonNullableString(out, job.prompt);
+    try out.writeAll(",\"name\":");
+    try writeJsonNullableString(out, job.name);
+    try out.writeAll(",\"model\":");
+    try writeJsonNullableString(out, job.model);
+    try out.writeAll(",\"enabled\":");
+    try writeJsonBool(out, job.enabled);
+    try out.writeAll(",\"delete_after_run\":");
+    try writeJsonBool(out, job.delete_after_run);
+    try out.print(",\"created_at_s\":{d}", .{job.created_at_s});
+    try out.writeAll(",\"last_output\":");
+    try writeJsonNullableString(out, job.last_output);
+    try out.writeAll("}");
 }
 
 fn writeCronJobJson(job: *const yc.cron.CronJob) void {
@@ -1884,40 +1945,26 @@ fn writeCronJobJson(job: *const yc.cron.CronJob) void {
     var bw = std_compat.fs.File.stdout().writer(&buf);
     const out = &bw.interface;
 
-    out.writeAll("{\"id\":") catch return;
-    writeJsonString(out, job.id) catch return;
-    out.writeAll(",\"expression\":") catch return;
-    writeJsonString(out, job.expression) catch return;
-    out.writeAll(",\"command\":") catch return;
-    writeJsonString(out, job.command) catch return;
-    out.print(",\"next_run_secs\":{d}", .{job.next_run_secs}) catch return;
-    out.writeAll(",\"last_run_secs\":") catch return;
-    writeJsonNullableI64(out, job.last_run_secs) catch return;
-    out.writeAll(",\"last_status\":") catch return;
-    writeJsonNullableString(out, job.last_status) catch return;
-    out.writeAll(",\"paused\":") catch return;
-    writeJsonBool(out, job.paused) catch return;
-    out.writeAll(",\"one_shot\":") catch return;
-    writeJsonBool(out, job.one_shot) catch return;
-    out.writeAll(",\"job_type\":") catch return;
-    writeJsonString(out, job.job_type.asStr()) catch return;
-    out.writeAll(",\"session_target\":") catch return;
-    writeJsonString(out, job.session_target.asStr()) catch return;
-    out.writeAll(",\"prompt\":") catch return;
-    writeJsonNullableString(out, job.prompt) catch return;
-    out.writeAll(",\"name\":") catch return;
-    writeJsonNullableString(out, job.name) catch return;
-    out.writeAll(",\"model\":") catch return;
-    writeJsonNullableString(out, job.model) catch return;
-    out.writeAll(",\"enabled\":") catch return;
-    writeJsonBool(out, job.enabled) catch return;
-    out.writeAll(",\"delete_after_run\":") catch return;
-    writeJsonBool(out, job.delete_after_run) catch return;
-    out.print(",\"created_at_s\":{d}", .{job.created_at_s}) catch return;
-    out.writeAll(",\"last_output\":") catch return;
-    writeJsonNullableString(out, job.last_output) catch return;
-    out.writeAll("}\n") catch return;
+    appendCronJobJson(out, job) catch return;
+    out.writeAll("\n") catch return;
     out.flush() catch return;
+}
+
+fn appendCronRunsJson(out: anytype, runs: []const yc.cron.CronRun) !void {
+    try out.writeAll("{\"runs\":[");
+    for (runs, 0..) |run, idx| {
+        if (idx > 0) try out.writeAll(",");
+        try out.print("{{\"id\":{d},\"job_id\":", .{run.id});
+        try writeJsonString(out, run.job_id);
+        try out.print(",\"started_at_s\":{d},\"finished_at_s\":{d},\"status\":", .{ run.started_at_s, run.finished_at_s });
+        try writeJsonString(out, run.status);
+        try out.writeAll(",\"output\":");
+        try writeJsonNullableString(out, run.output);
+        try out.writeAll(",\"duration_ms\":");
+        try writeJsonNullableI64(out, run.duration_ms);
+        try out.writeAll("}");
+    }
+    try out.print("],\"total\":{d}}}", .{runs.len});
 }
 
 fn writeCronRunsJson(runs: []const yc.cron.CronRun) void {
@@ -1925,20 +1972,8 @@ fn writeCronRunsJson(runs: []const yc.cron.CronRun) void {
     var bw = std_compat.fs.File.stdout().writer(&buf);
     const out = &bw.interface;
 
-    out.writeAll("{\"runs\":[") catch return;
-    for (runs, 0..) |run, idx| {
-        if (idx > 0) out.writeAll(",") catch return;
-        out.print("{{\"id\":{d},\"job_id\":", .{run.id}) catch return;
-        writeJsonString(out, run.job_id) catch return;
-        out.print(",\"started_at_s\":{d},\"finished_at_s\":{d},\"status\":", .{ run.started_at_s, run.finished_at_s }) catch return;
-        writeJsonString(out, run.status) catch return;
-        out.writeAll(",\"output\":") catch return;
-        writeJsonNullableString(out, run.output) catch return;
-        out.writeAll(",\"duration_ms\":") catch return;
-        writeJsonNullableI64(out, run.duration_ms) catch return;
-        out.writeAll("}") catch return;
-    }
-    out.print("],\"total\":{d}}}\n", .{runs.len}) catch return;
+    appendCronRunsJson(out, runs) catch return;
+    out.writeAll("\n") catch return;
     out.flush() catch return;
 }
 
@@ -1987,6 +2022,113 @@ fn writeMemoryEntryJson(out: anytype, entry: yc.memory.MemoryEntry) !void {
     try out.writeAll(",\"session_id\":");
     try writeJsonNullableString(out, entry.session_id);
     try out.writeAll("}");
+}
+
+const MemoryStatsPayload = struct {
+    backend: []const u8,
+    retrieval: []const u8,
+    vector: []const u8,
+    embedding: []const u8,
+    rollout: []const u8,
+    sync: []const u8,
+    sources: usize,
+    fallback: []const u8,
+    entries: usize,
+    vector_entries: ?usize,
+    outbox_pending: ?usize,
+};
+
+fn appendMemoryStatsJson(out: anytype, payload: MemoryStatsPayload) !void {
+    try out.writeAll("{\"backend\":");
+    try writeJsonString(out, payload.backend);
+    try out.writeAll(",\"retrieval\":");
+    try writeJsonString(out, payload.retrieval);
+    try out.writeAll(",\"vector\":");
+    try writeJsonString(out, payload.vector);
+    try out.writeAll(",\"embedding\":");
+    try writeJsonString(out, payload.embedding);
+    try out.writeAll(",\"rollout\":");
+    try writeJsonString(out, payload.rollout);
+    try out.writeAll(",\"sync\":");
+    try writeJsonString(out, payload.sync);
+    try out.print(",\"sources\":{d},\"fallback\":", .{payload.sources});
+    try writeJsonString(out, payload.fallback);
+    try out.print(",\"entries\":{d},\"vector_entries\":", .{payload.entries});
+    if (payload.vector_entries) |value| {
+        try out.print("{d}", .{value});
+    } else {
+        try out.writeAll("null");
+    }
+    try out.writeAll(",\"outbox_pending\":");
+    if (payload.outbox_pending) |value| {
+        try out.print("{d}", .{value});
+    } else {
+        try out.writeAll("null");
+    }
+    try out.writeAll("}");
+}
+
+fn appendMemoryMaintenanceJson(out: anytype, field_name: []const u8, count: usize, skipped: ?bool) !void {
+    try out.writeAll("{\"");
+    try out.writeAll(field_name);
+    try out.print("\":{d}", .{count});
+    if (skipped) |flag| {
+        try out.writeAll(",\"skipped\":");
+        try writeJsonBool(out, flag);
+    }
+    try out.writeAll("}");
+}
+
+fn appendMemoryMutationJson(out: anytype, action: []const u8, entry: yc.memory.MemoryEntry) !void {
+    try out.writeAll("{\"action\":");
+    try writeJsonString(out, action);
+    try out.writeAll(",\"entry\":");
+    try writeMemoryEntryJson(out, entry);
+    try out.writeAll("}");
+}
+
+fn appendMemoryDeleteJson(out: anytype, key: []const u8, session_id: ?[]const u8, deleted: bool) !void {
+    try out.writeAll("{\"key\":");
+    try writeJsonString(out, key);
+    try out.writeAll(",\"session_id\":");
+    try writeJsonNullableString(out, session_id);
+    try out.writeAll(",\"deleted\":");
+    try writeJsonBool(out, deleted);
+    try out.writeAll("}");
+}
+
+fn appendMemorySearchResultsJson(out: anytype, results: []const yc.memory.RetrievalCandidate) !void {
+    try out.writeAll("[");
+    for (results, 0..) |rc, idx| {
+        if (idx > 0) try out.writeAll(",");
+        try out.writeAll("{\"key\":");
+        try writeJsonString(out, rc.key);
+        try out.writeAll(",\"category\":");
+        try writeJsonString(out, rc.category.toString());
+        try out.writeAll(",\"snippet\":");
+        try writeJsonString(out, rc.snippet);
+        try out.writeAll(",\"source\":");
+        try writeJsonString(out, rc.source);
+        try out.writeAll(",\"source_path\":");
+        try writeJsonString(out, rc.source_path);
+        try out.print(",\"final_score\":{d},\"start_line\":{d},\"end_line\":{d},\"created_at\":{d},\"keyword_rank\":", .{
+            rc.final_score,
+            rc.start_line,
+            rc.end_line,
+            rc.created_at,
+        });
+        try writeJsonNullableU32(out, rc.keyword_rank);
+        try out.writeAll(",\"vector_score\":");
+        try writeJsonNullableF32(out, rc.vector_score);
+        try out.writeAll("}");
+    }
+    try out.writeAll("]");
+}
+
+fn appendAgentSessionTerminationJson(out: anytype, session_key: []const u8) !void {
+    try out.writeAll("{\"session_key\":");
+    try writeJsonString(out, session_key);
+    try out.writeAll(",\"terminated\":true}");
 }
 
 fn printMemoryRuntimeInitFailure(allocator: std.mem.Allocator, backend: []const u8) void {
@@ -2068,31 +2210,20 @@ fn runMemory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
             var buf: [8192]u8 = undefined;
             var bw = std_compat.fs.File.stdout().writer(&buf);
             const out = &bw.interface;
-            out.writeAll("{\"backend\":") catch return;
-            writeJsonString(out, r.primary_backend) catch return;
-            out.writeAll(",\"retrieval\":") catch return;
-            writeJsonString(out, r.retrieval_mode) catch return;
-            out.writeAll(",\"vector\":") catch return;
-            writeJsonString(out, r.vector_mode) catch return;
-            out.writeAll(",\"embedding\":") catch return;
-            writeJsonString(out, r.embedding_provider) catch return;
-            out.writeAll(",\"rollout\":") catch return;
-            writeJsonString(out, r.rollout_mode) catch return;
-            out.writeAll(",\"sync\":") catch return;
-            writeJsonString(out, r.vector_sync_mode) catch return;
-            out.print(",\"sources\":{d},\"fallback\":", .{r.source_count}) catch return;
-            writeJsonString(out, r.fallback_policy) catch return;
-            out.print(",\"entries\":{d},", .{report.entry_count}) catch return;
-            if (report.vector_entry_count) |n| {
-                out.print("\"vector_entries\":{d},", .{n}) catch return;
-            } else {
-                out.writeAll("\"vector_entries\":null,") catch return;
-            }
-            if (report.outbox_pending) |n| {
-                out.print("\"outbox_pending\":{d}}}\n", .{n}) catch return;
-            } else {
-                out.writeAll("\"outbox_pending\":null}\n") catch return;
-            }
+            appendMemoryStatsJson(out, .{
+                .backend = r.primary_backend,
+                .retrieval = r.retrieval_mode,
+                .vector = r.vector_mode,
+                .embedding = r.embedding_provider,
+                .rollout = r.rollout_mode,
+                .sync = r.vector_sync_mode,
+                .sources = r.source_count,
+                .fallback = r.fallback_policy,
+                .entries = report.entry_count,
+                .vector_entries = report.vector_entry_count,
+                .outbox_pending = report.outbox_pending,
+            }) catch return;
+            out.writeAll("\n") catch return;
             out.flush() catch return;
         } else {
             std.debug.print("Memory stats:\n", .{});
@@ -2136,7 +2267,8 @@ fn runMemory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
             var buf: [256]u8 = undefined;
             var bw = std_compat.fs.File.stdout().writer(&buf);
             const out = &bw.interface;
-            out.print("{{\"reindexed\":{d},\"skipped\":{s}}}\n", .{ count, if (skipped) "true" else "false" }) catch return;
+            appendMemoryMaintenanceJson(out, "reindexed", count, skipped) catch return;
+            out.writeAll("\n") catch return;
             out.flush() catch return;
         } else if (skipped) {
             std.debug.print("Vector plane is disabled; reindex skipped (0 entries).\n", .{});
@@ -2153,7 +2285,8 @@ fn runMemory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
             var buf: [256]u8 = undefined;
             var bw = std_compat.fs.File.stdout().writer(&buf);
             const out = &bw.interface;
-            out.print("{{\"drained\":{d}}}\n", .{drained}) catch return;
+            appendMemoryMaintenanceJson(out, "drained", drained, null) catch return;
+            out.writeAll("\n") catch return;
             out.flush() catch return;
         } else {
             std.debug.print("Outbox drain complete: {d} operation(s) processed.\n", .{drained});
@@ -2235,11 +2368,8 @@ fn runMemory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
                 var buf: [2048]u8 = undefined;
                 var bw = std_compat.fs.File.stdout().writer(&buf);
                 const out = &bw.interface;
-                out.writeAll("{\"key\":") catch return;
-                writeJsonString(out, key) catch return;
-                out.writeAll(",\"session_id\":") catch return;
-                writeJsonNullableString(out, session_id) catch return;
-                out.writeAll(",\"deleted\":true}\n") catch return;
+                appendMemoryDeleteJson(out, key, session_id, true) catch return;
+                out.writeAll("\n") catch return;
                 out.flush() catch return;
             } else {
                 std.debug.print("Deleted memory entry: {s}\n", .{key});
@@ -2249,11 +2379,8 @@ fn runMemory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
                 var buf: [2048]u8 = undefined;
                 var bw = std_compat.fs.File.stdout().writer(&buf);
                 const out = &bw.interface;
-                out.writeAll("{\"key\":") catch return;
-                writeJsonString(out, key) catch return;
-                out.writeAll(",\"session_id\":") catch return;
-                writeJsonNullableString(out, session_id) catch return;
-                out.writeAll(",\"deleted\":false}\n") catch return;
+                appendMemoryDeleteJson(out, key, session_id, false) catch return;
+                out.writeAll("\n") catch return;
                 out.flush() catch return;
             } else {
                 std.debug.print("Entry not deleted (missing or backend is append-only): {s}\n", .{key});
@@ -2461,31 +2588,8 @@ fn runMemory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
             var buf: [65536]u8 = undefined;
             var bw = std_compat.fs.File.stdout().writer(&buf);
             const out = &bw.interface;
-            out.writeAll("[") catch return;
-            for (results, 0..) |rc, idx| {
-                if (idx > 0) out.writeAll(",") catch return;
-                out.writeAll("{\"key\":") catch return;
-                writeJsonString(out, rc.key) catch return;
-                out.writeAll(",\"category\":") catch return;
-                writeJsonString(out, rc.category.toString()) catch return;
-                out.writeAll(",\"snippet\":") catch return;
-                writeJsonString(out, rc.snippet) catch return;
-                out.writeAll(",\"source\":") catch return;
-                writeJsonString(out, rc.source) catch return;
-                out.writeAll(",\"source_path\":") catch return;
-                writeJsonString(out, rc.source_path) catch return;
-                out.print(",\"final_score\":{d},\"start_line\":{d},\"end_line\":{d},\"created_at\":{d},\"keyword_rank\":", .{
-                    rc.final_score,
-                    rc.start_line,
-                    rc.end_line,
-                    rc.created_at,
-                }) catch return;
-                writeJsonNullableU32(out, rc.keyword_rank) catch return;
-                out.writeAll(",\"vector_score\":") catch return;
-                writeJsonNullableF32(out, rc.vector_score) catch return;
-                out.writeAll("}") catch return;
-            }
-            out.writeAll("]\n") catch return;
+            appendMemorySearchResultsJson(out, results) catch return;
+            out.writeAll("\n") catch return;
             out.flush() catch return;
         } else {
             std.debug.print("Search results: {d}\n", .{results.len});
@@ -2567,11 +2671,8 @@ fn runMemory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
                 var buf: [65536]u8 = undefined;
                 var bw = std_compat.fs.File.stdout().writer(&buf);
                 const out = &bw.interface;
-                out.writeAll("{\"action\":") catch return;
-                writeJsonString(out, if (std.mem.eql(u8, subcmd, "update")) "update" else "store") catch return;
-                out.writeAll(",\"entry\":") catch return;
-                writeMemoryEntryJson(out, entry) catch return;
-                out.writeAll("}\n") catch return;
+                appendMemoryMutationJson(out, if (std.mem.eql(u8, subcmd, "update")) "update" else "store", entry) catch return;
+                out.writeAll("\n") catch return;
                 out.flush() catch return;
             } else {
                 std.debug.print("Stored memory entry: {s}\n", .{key});
@@ -2834,24 +2935,46 @@ fn runHistory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void 
     std_compat.process.exit(1);
 }
 
+fn appendHistoryListJson(out: anytype, sessions: []const yc.memory.SessionInfo, total: u64, limit: usize, offset: usize) !void {
+    try out.print("{{\"total\":{d},\"limit\":{d},\"offset\":{d},\"sessions\":[", .{ total, limit, offset });
+    for (sessions, 0..) |s, idx| {
+        if (idx > 0) try out.writeAll(",");
+        try out.writeAll("{\"session_id\":");
+        try writeJsonString(out, s.session_id);
+        try out.print(",\"message_count\":{d},\"first_message_at\":", .{s.message_count});
+        try writeJsonString(out, s.first_message_at);
+        try out.writeAll(",\"last_message_at\":");
+        try writeJsonString(out, s.last_message_at);
+        try out.writeAll("}");
+    }
+    try out.writeAll("]}");
+}
+
 fn writeHistoryListJson(sessions: []const yc.memory.SessionInfo, total: u64, limit: usize, offset: usize) void {
     var buf: [65536]u8 = undefined;
     var bw = std_compat.fs.File.stdout().writer(&buf);
     const out = &bw.interface;
 
-    out.print("{{\"total\":{d},\"limit\":{d},\"offset\":{d},\"sessions\":[", .{ total, limit, offset }) catch return;
-    for (sessions, 0..) |s, idx| {
-        if (idx > 0) out.writeAll(",") catch return;
-        out.writeAll("{\"session_id\":") catch return;
-        writeJsonString(out, s.session_id) catch return;
-        out.print(",\"message_count\":{d},\"first_message_at\":", .{s.message_count}) catch return;
-        writeJsonString(out, s.first_message_at) catch return;
-        out.writeAll(",\"last_message_at\":") catch return;
-        writeJsonString(out, s.last_message_at) catch return;
-        out.writeAll("}") catch return;
-    }
-    out.writeAll("]}\n") catch return;
+    appendHistoryListJson(out, sessions, total, limit, offset) catch return;
+    out.writeAll("\n") catch return;
     out.flush() catch return;
+}
+
+fn appendHistoryShowJson(out: anytype, session_id: []const u8, messages: []const yc.memory.DetailedMessageEntry, total: u64, limit: usize, offset: usize) !void {
+    try out.writeAll("{\"session_id\":");
+    try writeJsonString(out, session_id);
+    try out.print(",\"total\":{d},\"limit\":{d},\"offset\":{d},\"messages\":[", .{ total, limit, offset });
+    for (messages, 0..) |m, idx| {
+        if (idx > 0) try out.writeAll(",");
+        try out.writeAll("{\"role\":");
+        try writeJsonString(out, m.role);
+        try out.writeAll(",\"content\":");
+        try writeJsonString(out, m.content);
+        try out.writeAll(",\"created_at\":");
+        try writeJsonString(out, m.created_at);
+        try out.writeAll("}");
+    }
+    try out.writeAll("]}");
 }
 
 fn writeHistoryShowJson(session_id: []const u8, messages: []const yc.memory.DetailedMessageEntry, total: u64, limit: usize, offset: usize) void {
@@ -2859,20 +2982,8 @@ fn writeHistoryShowJson(session_id: []const u8, messages: []const yc.memory.Deta
     var bw = std_compat.fs.File.stdout().writer(&buf);
     const out = &bw.interface;
 
-    out.writeAll("{\"session_id\":") catch return;
-    writeJsonString(out, session_id) catch return;
-    out.print(",\"total\":{d},\"limit\":{d},\"offset\":{d},\"messages\":[", .{ total, limit, offset }) catch return;
-    for (messages, 0..) |m, idx| {
-        if (idx > 0) out.writeAll(",") catch return;
-        out.writeAll("{\"role\":") catch return;
-        writeJsonString(out, m.role) catch return;
-        out.writeAll(",\"content\":") catch return;
-        writeJsonString(out, m.content) catch return;
-        out.writeAll(",\"created_at\":") catch return;
-        writeJsonString(out, m.created_at) catch return;
-        out.writeAll("}") catch return;
-    }
-    out.writeAll("]}\n") catch return;
+    appendHistoryShowJson(out, session_id, messages, total, limit, offset) catch return;
+    out.writeAll("\n") catch return;
     out.flush() catch return;
 }
 
@@ -3141,16 +3252,33 @@ fn buildModelsSummaryJson(allocator: std.mem.Allocator, cfg: *const yc.config.Co
     return try out.toOwnedSlice();
 }
 
+fn appendConfigValueResult(out: anytype, path: []const u8, value_json: []const u8) !void {
+    try out.writeAll("{\"path\":");
+    try writeJsonString(out, path);
+    try out.writeAll(",\"value\":");
+    try out.writeAll(value_json);
+    try out.writeAll("}");
+}
+
+fn appendConfigReloadJson(out: anytype) !void {
+    try out.writeAll(
+        "{\"reloaded\":true,\"live_applied\":false,\"message\":\"config.json re-read from disk; restart running daemons to apply changes\"}",
+    );
+}
+
+fn appendValidationJson(out: anytype, valid: bool) !void {
+    try out.writeAll("{\"valid\":");
+    try writeJsonBool(out, valid);
+    try out.writeAll("}");
+}
+
 fn writeConfigValueResult(path: []const u8, value_json: []const u8) void {
     var buf: [4096]u8 = undefined;
     var bw = std_compat.fs.File.stdout().writer(&buf);
     const out = &bw.interface;
 
-    out.writeAll("{\"path\":") catch return;
-    writeJsonString(out, path) catch return;
-    out.writeAll(",\"value\":") catch return;
-    out.writeAll(value_json) catch return;
-    out.writeAll("}\n") catch return;
+    appendConfigValueResult(out, path, value_json) catch return;
+    out.writeAll("\n") catch return;
     out.flush() catch return;
 }
 
@@ -3310,7 +3438,12 @@ fn runConfig(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
         };
 
         if (hasJsonFlag(sub_args[1..])) {
-            printStdoutBytes("{\"reloaded\":true,\"live_applied\":false,\"message\":\"config.json re-read from disk; restart running daemons to apply changes\"}\n");
+            var buf: [256]u8 = undefined;
+            var bw = std_compat.fs.File.stdout().writer(&buf);
+            const out = &bw.interface;
+            appendConfigReloadJson(out) catch return;
+            out.writeAll("\n") catch return;
+            out.flush() catch return;
         } else {
             std.debug.print("Config re-read from disk. Restart running daemons to apply changes.\n", .{});
         }
@@ -3347,7 +3480,12 @@ fn runConfig(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
         }
 
         if (json_mode) {
-            printStdoutBytes("{\"valid\":true}\n");
+            var buf: [64]u8 = undefined;
+            var bw = std_compat.fs.File.stdout().writer(&buf);
+            const out = &bw.interface;
+            appendValidationJson(out, true) catch return;
+            out.writeAll("\n") catch return;
+            out.flush() catch return;
         } else {
             std.debug.print("Config validation: OK\n", .{});
         }
@@ -5209,4 +5347,351 @@ test "parseCronAddAgentOptions preserves delivery account flag" {
     try std.testing.expect(!options.delivery.channel_owned);
     try std.testing.expect(!options.delivery.account_id_owned);
     try std.testing.expect(!options.delivery.to_owned);
+}
+
+test "appendAgentInvokeResponseJson renders machine-readable turn payload" {
+    var buf: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try appendAgentInvokeResponseJson(&writer, "api:default", "hello", 3);
+    try std.testing.expectEqualStrings(
+        "{\"session\":\"api:default\",\"response\":\"hello\",\"turn_count\":3}",
+        writer.buffered(),
+    );
+}
+
+test "appendAgentSessionListJson renders persisted session metadata" {
+    const sessions = [_]yc.memory.SessionInfo{
+        .{
+            .session_id = "s-1",
+            .message_count = 4,
+            .first_message_at = "2026-04-17T00:00:00Z",
+            .last_message_at = "2026-04-17T00:05:00Z",
+        },
+        .{
+            .session_id = "s-2",
+            .message_count = 2,
+            .first_message_at = "2026-04-17T00:10:00Z",
+            .last_message_at = "2026-04-17T00:11:00Z",
+        },
+    };
+    var buf: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try appendAgentSessionListJson(&writer, &sessions, 2);
+    try std.testing.expectEqualStrings(
+        "{\"sessions\":[{\"session_key\":\"s-1\",\"created_at\":\"2026-04-17T00:00:00Z\",\"last_active\":\"2026-04-17T00:05:00Z\",\"turn_count\":2,\"turn_running\":false},{\"session_key\":\"s-2\",\"created_at\":\"2026-04-17T00:10:00Z\",\"last_active\":\"2026-04-17T00:11:00Z\",\"turn_count\":1,\"turn_running\":false}],\"total\":2}",
+        writer.buffered(),
+    );
+}
+
+test "appendAgentSessionDetailJson renders one persisted session" {
+    const session: yc.memory.SessionInfo = .{
+        .session_id = "s-1",
+        .message_count = 6,
+        .first_message_at = "2026-04-17T00:00:00Z",
+        .last_message_at = "2026-04-17T00:12:00Z",
+    };
+    var buf: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try appendAgentSessionDetailJson(&writer, session);
+    try std.testing.expectEqualStrings(
+        "{\"session_key\":\"s-1\",\"created_at\":\"2026-04-17T00:00:00Z\",\"last_active\":\"2026-04-17T00:12:00Z\",\"turn_count\":3,\"turn_running\":false}",
+        writer.buffered(),
+    );
+}
+
+test "appendHistoryListJson renders paginated session history metadata" {
+    const sessions = [_]yc.memory.SessionInfo{
+        .{
+            .session_id = "s-1",
+            .message_count = 3,
+            .first_message_at = "2026-04-17T00:00:00Z",
+            .last_message_at = "2026-04-17T00:03:00Z",
+        },
+    };
+    var buf: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try appendHistoryListJson(&writer, &sessions, 9, 50, 0);
+    try std.testing.expectEqualStrings(
+        "{\"total\":9,\"limit\":50,\"offset\":0,\"sessions\":[{\"session_id\":\"s-1\",\"message_count\":3,\"first_message_at\":\"2026-04-17T00:00:00Z\",\"last_message_at\":\"2026-04-17T00:03:00Z\"}]}",
+        writer.buffered(),
+    );
+}
+
+test "appendHistoryShowJson renders paginated message history" {
+    const messages = [_]yc.memory.DetailedMessageEntry{
+        .{
+            .role = "user",
+            .content = "hi",
+            .created_at = "2026-04-17T00:00:00Z",
+        },
+        .{
+            .role = "assistant",
+            .content = "hello",
+            .created_at = "2026-04-17T00:00:01Z",
+        },
+    };
+    var buf: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try appendHistoryShowJson(&writer, "s-1", &messages, 2, 100, 0);
+    try std.testing.expectEqualStrings(
+        "{\"session_id\":\"s-1\",\"total\":2,\"limit\":100,\"offset\":0,\"messages\":[{\"role\":\"user\",\"content\":\"hi\",\"created_at\":\"2026-04-17T00:00:00Z\"},{\"role\":\"assistant\",\"content\":\"hello\",\"created_at\":\"2026-04-17T00:00:01Z\"}]}",
+        writer.buffered(),
+    );
+}
+
+test "appendConfigMutationJson renders persisted config mutation result" {
+    const result: yc.config_mutator.MutationResult = .{
+        .path = "gateway.port",
+        .changed = true,
+        .applied = true,
+        .requires_restart = false,
+        .old_value_json = "3000",
+        .new_value_json = "43123",
+        .backup_path = "/tmp/config.json.bak",
+    };
+    var buf: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try appendConfigMutationJson(&writer, .set, &result);
+    try std.testing.expectEqualStrings(
+        "{\"action\":\"set\",\"path\":\"gateway.port\",\"changed\":true,\"applied\":true,\"requires_restart\":false,\"old_value\":3000,\"new_value\":43123,\"backup_path\":\"/tmp/config.json.bak\"}",
+        writer.buffered(),
+    );
+}
+
+test "appendConfigValueResult renders dotted path lookup payload" {
+    var buf: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try appendConfigValueResult(&writer, "gateway.port", "43123");
+    try std.testing.expectEqualStrings(
+        "{\"path\":\"gateway.port\",\"value\":43123}",
+        writer.buffered(),
+    );
+}
+
+test "appendConfigReloadJson renders reload acknowledgment payload" {
+    var buf: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try appendConfigReloadJson(&writer);
+    try std.testing.expectEqualStrings(
+        "{\"reloaded\":true,\"live_applied\":false,\"message\":\"config.json re-read from disk; restart running daemons to apply changes\"}",
+        writer.buffered(),
+    );
+}
+
+test "appendValidationJson renders validation result payload" {
+    var buf: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try appendValidationJson(&writer, true);
+    try std.testing.expectEqualStrings("{\"valid\":true}", writer.buffered());
+}
+
+test "appendModelInfoJson canonicalizes provider-prefixed models" {
+    var buf: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try appendModelInfoJson(&writer, "openai/gpt-5");
+    try std.testing.expectEqualStrings(
+        "{\"name\":\"openai/gpt-5\",\"provider\":\"openai\",\"canonical_name\":\"openai/gpt-5\",\"context_window\":null}",
+        writer.buffered(),
+    );
+}
+
+test "appendCronJobJson renders full cron job detail payload" {
+    const job: yc.cron.CronJob = .{
+        .id = "job-1",
+        .expression = "*/5 * * * *",
+        .command = "echo hello",
+        .next_run_secs = 123,
+        .last_run_secs = 100,
+        .last_status = "ok",
+        .paused = false,
+        .one_shot = false,
+        .job_type = .agent,
+        .session_target = .main,
+        .prompt = "Check status",
+        .name = "health-check",
+        .model = "openai/gpt-5",
+        .enabled = true,
+        .delete_after_run = false,
+        .created_at_s = 42,
+        .last_output = "done",
+    };
+    var buf: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try appendCronJobJson(&writer, &job);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"job_type\":\"agent\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"session_target\":\"main\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"model\":\"openai/gpt-5\"") != null);
+}
+
+test "appendCronRunsJson renders paginated cron run history" {
+    const runs = [_]yc.cron.CronRun{
+        .{
+            .id = 1,
+            .job_id = "job-1",
+            .started_at_s = 100,
+            .finished_at_s = 101,
+            .status = "ok",
+            .output = "done",
+            .duration_ms = 321,
+        },
+    };
+    var buf: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try appendCronRunsJson(&writer, &runs);
+    try std.testing.expectEqualStrings(
+        "{\"runs\":[{\"id\":1,\"job_id\":\"job-1\",\"started_at_s\":100,\"finished_at_s\":101,\"status\":\"ok\",\"output\":\"done\",\"duration_ms\":321}],\"total\":1}",
+        writer.buffered(),
+    );
+}
+
+test "writeSkillJson renders public skill detail without leaking extra fields" {
+    const skill: yc.skills.Skill = .{
+        .name = "checks",
+        .version = "1.0.0",
+        .description = "Checks",
+        .author = "nullclaw",
+        .instructions = "Use checks",
+        .always = true,
+        .available = true,
+        .path = "/tmp/workspace/skills/checks",
+    };
+    var buf: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try writeSkillJson(&writer, "/tmp/workspace", null, skill);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"name\":\"checks\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"source\":\"workspace\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"instructions_bytes\":10") != null);
+}
+
+test "writeMemoryEntryJson renders nullable session ids" {
+    const entry = yc.memory.MemoryEntry{
+        .id = "entry-1",
+        .key = "fact",
+        .category = .conversation,
+        .timestamp = "2026-04-17T00:00:00Z",
+        .content = "hello",
+        .session_id = null,
+    };
+    var buf: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try writeMemoryEntryJson(&writer, entry);
+    try std.testing.expectEqualStrings(
+        "{\"key\":\"fact\",\"category\":\"conversation\",\"timestamp\":\"2026-04-17T00:00:00Z\",\"content\":\"hello\",\"session_id\":null}",
+        writer.buffered(),
+    );
+}
+
+test "appendMemoryStatsJson renders runtime memory stats payload" {
+    var buf: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try appendMemoryStatsJson(&writer, .{
+        .backend = "sqlite",
+        .retrieval = "hybrid",
+        .vector = "sqlite",
+        .embedding = "disabled",
+        .rollout = "primary",
+        .sync = "inline",
+        .sources = 1,
+        .fallback = "none",
+        .entries = 5,
+        .vector_entries = 2,
+        .outbox_pending = 0,
+    });
+    try std.testing.expectEqualStrings(
+        "{\"backend\":\"sqlite\",\"retrieval\":\"hybrid\",\"vector\":\"sqlite\",\"embedding\":\"disabled\",\"rollout\":\"primary\",\"sync\":\"inline\",\"sources\":1,\"fallback\":\"none\",\"entries\":5,\"vector_entries\":2,\"outbox_pending\":0}",
+        writer.buffered(),
+    );
+}
+
+test "appendMemoryMaintenanceJson renders reindex and drain payloads" {
+    var reindex_buf: [128]u8 = undefined;
+    var reindex_writer: std.Io.Writer = .fixed(&reindex_buf);
+    try appendMemoryMaintenanceJson(&reindex_writer, "reindexed", 3, true);
+    try std.testing.expectEqualStrings("{\"reindexed\":3,\"skipped\":true}", reindex_writer.buffered());
+
+    var drain_buf: [128]u8 = undefined;
+    var drain_writer: std.Io.Writer = .fixed(&drain_buf);
+    try appendMemoryMaintenanceJson(&drain_writer, "drained", 7, null);
+    try std.testing.expectEqualStrings("{\"drained\":7}", drain_writer.buffered());
+}
+
+test "appendMemoryMutationJson renders store and update payloads" {
+    const entry = yc.memory.MemoryEntry{
+        .id = "entry-1",
+        .key = "fact",
+        .category = .conversation,
+        .timestamp = "2026-04-17T00:00:00Z",
+        .content = "hello",
+        .session_id = "s-1",
+    };
+    var buf: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try appendMemoryMutationJson(&writer, "store", entry);
+    try std.testing.expectEqualStrings(
+        "{\"action\":\"store\",\"entry\":{\"key\":\"fact\",\"category\":\"conversation\",\"timestamp\":\"2026-04-17T00:00:00Z\",\"content\":\"hello\",\"session_id\":\"s-1\"}}",
+        writer.buffered(),
+    );
+}
+
+test "appendMemoryDeleteJson renders delete outcome payload" {
+    var buf: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try appendMemoryDeleteJson(&writer, "fact", "s-1", true);
+    try std.testing.expectEqualStrings(
+        "{\"key\":\"fact\",\"session_id\":\"s-1\",\"deleted\":true}",
+        writer.buffered(),
+    );
+}
+
+test "appendMemorySearchResultsJson renders retrieval candidates" {
+    const results = [_]yc.memory.RetrievalCandidate{
+        .{
+            .id = "row-1",
+            .key = "fact",
+            .content = "hello world",
+            .snippet = "hello",
+            .category = .conversation,
+            .keyword_rank = 1,
+            .vector_score = null,
+            .final_score = 0.9,
+            .source = "primary",
+            .source_path = "memory://fact",
+            .start_line = 1,
+            .end_line = 1,
+            .created_at = 42,
+        },
+    };
+    var buf: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try appendMemorySearchResultsJson(&writer, &results);
+    try std.testing.expectEqualStrings(
+        "[{\"key\":\"fact\",\"category\":\"conversation\",\"snippet\":\"hello\",\"source\":\"primary\",\"source_path\":\"memory://fact\",\"final_score\":0.9,\"start_line\":1,\"end_line\":1,\"created_at\":42,\"keyword_rank\":1,\"vector_score\":null}]",
+        writer.buffered(),
+    );
+}
+
+test "appendAgentSessionTerminationJson renders terminated session payload" {
+    var buf: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try appendAgentSessionTerminationJson(&writer, "s-1");
+    try std.testing.expectEqualStrings("{\"session_key\":\"s-1\",\"terminated\":true}", writer.buffered());
 }
